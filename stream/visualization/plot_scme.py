@@ -5,7 +5,7 @@ from stream.classes.cost_model.cost_model import StreamCostModelEvaluation
 
 
 def bar_plot_stream_cost_model_evaluations_breakdown(
-    scmes: List[StreamCostModelEvaluation], fig_path: str
+        scmes: List[StreamCostModelEvaluation], fig_path: str, show: bool = False
 ):
     barWidth = 0.1
 
@@ -55,6 +55,7 @@ def bar_plot_stream_cost_model_evaluations_breakdown(
     ax.set_ylabel("Energy [pJ]", fontsize=12)
 
     fig.tight_layout()
-    plt.show()
+    if show:
+        plt.show(block=False)
     plt.savefig(fig_path, format="png", bbox_inches="tight")
     print(f"Saved breakdown fig to {fig_path}")

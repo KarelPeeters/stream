@@ -8,13 +8,13 @@ class DummyNode(Node):
     """
 
     def __init__(
-        self,
-        id: int,
-        predecessors,
-        node_name,
-        input_names: List[str],
-        output_names: List[str],
-        op_type: str = "dummy",
+            self,
+            id: int,
+            predecessors,
+            node_name,
+            input_names: List[str],
+            output_names: List[str],
+            op_type: str = "dummy",
     ) -> None:
         super().__init__(
             type=op_type,

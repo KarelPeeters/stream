@@ -1,9 +1,10 @@
+import logging
+
+import numpy as np
 from brokenaxes import brokenaxes
 from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
 from networkx import DiGraph
-import numpy as np
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +21,13 @@ PLOT_DEPENDENCY_LINES_SAME_CORE = True
 
 
 def plot_timeline_brokenaxes(
-    scme,  # StreamCostModelEvaluation
-    draw_dependencies: object = True,
-    section_start_percent: object = (0, 50, 95),
-    percent_shown: object = (5, 5, 5),
-    plot_data_transfer: object = False,
-    fig_path: object = "outputs/schedule_plot.png",
+        scme,  # StreamCostModelEvaluation
+        draw_dependencies: object = True,
+        section_start_percent: object = (0, 50, 95),
+        percent_shown: object = (5, 5, 5),
+        plot_data_transfer: object = False,
+        fig_path: object = "outputs/schedule_plot.png",
+        show: bool = False
 ) -> object:
     G: DiGraph = scme.workload
     accelerator: Accelerator = scme.accelerator
@@ -63,7 +65,7 @@ def plot_timeline_brokenaxes(
         if pair_link:
             for link in pair_link:
                 if (
-                    link.active_periods or link.blocked_periods
+                        link.active_periods or link.blocked_periods
                 ) and link not in used_cl_collect:
                     used_cl_collect.append(link)
         # Then plot the active data transfer period on these unique communication links
@@ -101,9 +103,9 @@ def plot_timeline_brokenaxes(
         y = cn.core_allocation - 0.25
         width = cn.runtime  # - 0.05
         if (
-            (x_starts[0] <= x <= x_ends[0])
-            or (x_starts[0] <= x + width <= x_ends[0])
-            or (x_starts[0] > x and x + width > x_ends[0])
+                (x_starts[0] <= x <= x_ends[0])
+                or (x_starts[0] <= x + width <= x_ends[0])
+                or (x_starts[0] > x and x + width > x_ends[0])
         ):
             # First ax is done separately because of handle
             handle = axs[0].add_patch(
@@ -131,9 +133,9 @@ def plot_timeline_brokenaxes(
             handle = None
         for ax_idx in range(1, nb_axs):
             if (
-                (x_starts[ax_idx] <= x <= x_ends[ax_idx])
-                or (x_starts[ax_idx] <= x + width <= x_ends[ax_idx])
-                or (x_starts[ax_idx] > x and x + width > x_ends[ax_idx])
+                    (x_starts[ax_idx] <= x <= x_ends[ax_idx])
+                    or (x_starts[ax_idx] <= x + width <= x_ends[ax_idx])
+                    or (x_starts[ax_idx] > x and x + width > x_ends[ax_idx])
             ):
                 axs[ax_idx].add_patch(
                     Rectangle(
@@ -175,7 +177,7 @@ def plot_timeline_brokenaxes(
             if pair_link:
                 for link in pair_link:
                     if (
-                        link.active_periods or link.blocked_periods
+                            link.active_periods or link.blocked_periods
                     ) and link not in used_cl_collect:
                         used_cl_collect.append(link)
 
@@ -198,9 +200,9 @@ def plot_timeline_brokenaxes(
                     width = blocked_period[1] - blocked_period[0]
                     for ax_idx in range(0, nb_axs):
                         if (
-                            (x_starts[ax_idx] <= x <= x_ends[ax_idx])
-                            or (x_starts[ax_idx] <= x + width <= x_ends[ax_idx])
-                            or (x_starts[ax_idx] > x and x + width > x_ends[ax_idx])
+                                (x_starts[ax_idx] <= x <= x_ends[ax_idx])
+                                or (x_starts[ax_idx] <= x + width <= x_ends[ax_idx])
+                                or (x_starts[ax_idx] > x and x + width > x_ends[ax_idx])
                         ):
                             axs[ax_idx].add_patch(
                                 Rectangle(
@@ -231,9 +233,9 @@ def plot_timeline_brokenaxes(
                     if active_period[2] == "W":
                         for ax_idx in range(0, nb_axs):
                             if (
-                                (x_starts[ax_idx] <= x <= x_ends[ax_idx])
-                                or (x_starts[ax_idx] <= x + width <= x_ends[ax_idx])
-                                or (x_starts[ax_idx] > x and x + width > x_ends[ax_idx])
+                                    (x_starts[ax_idx] <= x <= x_ends[ax_idx])
+                                    or (x_starts[ax_idx] <= x + width <= x_ends[ax_idx])
+                                    or (x_starts[ax_idx] > x and x + width > x_ends[ax_idx])
                             ):
                                 axs[ax_idx].add_patch(
                                     Rectangle(
@@ -250,9 +252,9 @@ def plot_timeline_brokenaxes(
                     else:
                         for ax_idx in range(0, nb_axs):
                             if (
-                                (x_starts[ax_idx] <= x <= x_ends[ax_idx])
-                                or (x_starts[ax_idx] <= x + width <= x_ends[ax_idx])
-                                or (x_starts[ax_idx] > x and x + width > x_ends[ax_idx])
+                                    (x_starts[ax_idx] <= x <= x_ends[ax_idx])
+                                    or (x_starts[ax_idx] <= x + width <= x_ends[ax_idx])
+                                    or (x_starts[ax_idx] > x and x + width > x_ends[ax_idx])
                             ):
                                 axs[ax_idx].add_patch(
                                     Rectangle(
@@ -345,7 +347,8 @@ def plot_timeline_brokenaxes(
         y_labels[i] = label.replace(f"Core({accelerator.offchip_core_id})", "DRAM")
     axs[0].set_yticks(range(len(y_labels)))
     axs[0].set_yticklabels(y_labels)
-    plt.show(block=False)
+    if show:
+        plt.show(block=False)
     plt.savefig(fig_path, format="png", bbox_inches="tight")
     logger.info(f"Plotted schedule timeline to {fig_path}")
 
