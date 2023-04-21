@@ -27,33 +27,44 @@ def random_ima_input(shape):
     return np.random.randint(-128, 127, shape)
 
 
+def ima_matmul(input, weight):
+    (height, width) = weight.shape
+    (n, height_1) = input.shape
+    assert height == height_1
+
+    output = np.zeros((n, width), dtype=np.int32)
+    for i in range(n):
+        for j in range(width):
+            output[i, j] = ima_sum(input[i, :], weight[:, j], 16, 16)
+
+    return output
+
+
 def main():
     n = 16
-    height = 64
-    width = 64
+    size = 64
     adc_low = 16
     adc_high = 16
 
     np.random.seed(0)
 
-    x = random_ima_input((n, height))
-    w = random_ima_weight((height, width))
+    x = random_ima_input((n, size))
+    w1 = random_ima_weight((size, size))
+    w2 = random_ima_weight((size, size))
 
-    y = np.zeros((n, width), dtype=np.int32)
-    for i in range(n):
-        for j in range(width):
-            y[i, j] = ima_sum(x[i, :], w[:, j], adc_low, adc_high)
+    y1 = ima_matmul(x, w1)
+    y2 = ima_matmul(y1, w2)
 
     with open("layer_weights.h", "w") as f:
         print(f"#define LAYER_N {n}", file=f)
-        print(f"#define LAYER_HEIGHT {height}", file=f)
-        print(f"#define LAYER_WIDTH {width}", file=f)
+        print(f"#define LAYER_SIZE {size}", file=f)
 
         print(f"#define DATA_I {array_to_str(x.flatten(), DataType.Int8)}", file=f)
-        print(f"#define DATA_W {array_to_str(w.flatten(), DataType.Int4)}", file=f)
-        print(f"#define DATA_O {array_to_str(y.flatten(), DataType.Int8)}", file=f)
+        print(f"#define DATA_W1 {array_to_str(w1.flatten(), DataType.Int4)}", file=f)
+        print(f"#define DATA_W2 {array_to_str(w2.flatten(), DataType.Int4)}", file=f)
+        print(f"#define DATA_O {array_to_str(y2.flatten(), DataType.Int8)}", file=f)
 
-    print(y)
+    print(y1)
 
 
 if __name__ == '__main__':
