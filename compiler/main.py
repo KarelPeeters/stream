@@ -28,6 +28,10 @@ class MemoryKind(enum.Enum):
     L2 = enum.auto()
     L1 = enum.auto()
 
+    @property
+    def addressable(self):
+        return self in (MemoryKind.L2, MemoryKind.L1)
+
 
 @dataclass
 class Pointer:
@@ -63,8 +67,17 @@ class Cycles:
         return f"CYCLES[{self.index}]"
 
 
+@dataclass
 class OperationCopy(Operation):
-    pass
+    dest: Pointer
+    src: Pointer
+    size_bytes: int
+
+    def generate_code(self, f, state):
+        # TODO generate async copy instead?
+        # TODO support L3 here too?
+        assert self.dest.kind.addressable and self.src.kind.addressable
+        f.writeln(f"memcpy({self.dest}, {self.src}, {self.size_bytes});")
 
 
 @dataclass
@@ -271,13 +284,21 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
     core = cn.get_core_allocation()
 
     if cn.equation == 'O[b][k]+=A[b][c]*B[c][k]':
-        operation = OperationMatmul(
-            dim_size["B"], dim_size["K"], dim_size["C"],
-            output.pointer_l1, input.pointer_l1, weight.pointer_l1,
-            state.new_profile(),
-        )
-        state.push_operation(core, operation)
+        # copy inputs
+        state.push_operation(core, OperationCopy(input.pointer_l1, input.pointer_l2, input.size_bytes))
+        state.push_operation(core, OperationCopy(weight.pointer_l1, weight.pointer_l2, weight.size_bytes))
 
+        # real operation
+        state.push_operation(core, OperationMatmul(
+            b=dim_size["B"], k=dim_size["K"], c=dim_size["C"],
+            weight=weight.pointer_l1, input=input.pointer_l1, output=output.pointer_l1,
+            profile=state.new_profile(),
+        ))
+
+        # copy output
+        state.push_operation(core, OperationCopy(output.pointer_l2, output.pointer_l1, output.size_bytes))
+
+        # simulate
         if state.sim:
             output.sim_value = ima_matmul(input.sim_value, weight.sim_value)
     else:
@@ -295,14 +316,8 @@ def generate_func_init(f, state: State):
 
     with f:
         OperationRecordCycles(state.cycles_start_init).generate_code(f, state)
-
-        # TODO replace memcpy with async memcopy
-        # TODO don't do all of this at once
-        # copy inputs and weights to L1
-        for name, buffer in state.buffers.items():
-            if buffer.constant:
-                f.writeln(f"memcpy({buffer.pointer_l1}, {buffer.pointer_l2}, {buffer.size_bytes});")
-
+        # put init code here?
+        # TODO maybe switch to list of operations for init too?
         OperationRecordCycles(state.cycles_end_init).generate_code(f, state)
 
     f.writeln("}")
@@ -314,7 +329,7 @@ def generate_func_final(f, state: State):
         for name, buffer in state.buffers.items():
             if buffer.pointer_l2_expected is not None:
                 f.writeln(
-                    f"check_matches({buffer.pointer_l2_expected}, {buffer.pointer_l2}, {buffer.size_bytes}, \"{name}\");")
+                    f"verify_output({buffer.pointer_l2_expected}, {buffer.pointer_l2}, {buffer.size_bytes}, \"{name}\");")
 
         f.writeln()
 
