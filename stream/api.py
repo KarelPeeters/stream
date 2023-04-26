@@ -4,9 +4,9 @@ from typing import Generator
 
 from zigzag.classes.stages import *
 
+from compiler.main import compiler
 from stream.api_edited import save_graph
 from stream.classes.stages import *
-from stream.emulator.main import compiler
 
 
 class DebugStage(Stage):
