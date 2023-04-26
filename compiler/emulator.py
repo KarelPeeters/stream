@@ -41,8 +41,8 @@ def ima_matmul(input, weight):
 
 
 def main():
-    n = 16
-    size = 64
+    n = 512
+    size = 32
     adc_low = 16
     adc_high = 16
 

@@ -7,6 +7,15 @@ class DataType(enum.Enum):
     Int4 = enum.auto()
     Int8 = enum.auto()
 
+    @property
+    def size_bytes(self):
+        if self == DataType.Int4:
+            return 0.5
+        elif self == DataType.Int8:
+            return 1
+
+        raise ValueError(f"unknown data type {self}")
+
 
 def array_to_str(data, data_type: DataType):
     data = np.array(data)
