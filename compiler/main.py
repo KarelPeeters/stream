@@ -42,7 +42,7 @@ class Lock:
     index: int
 
     def __str__(self):
-        return f"&LOCKS[{self.index}]"
+        return f"LOCKS[{self.index}]"
 
 
 @dataclass
@@ -50,7 +50,7 @@ class Profile:
     index: int
 
     def __str__(self):
-        return f"&PROFILES[{self.index}]"
+        return f"PROFILES[{self.index}]"
 
 
 @dataclass
@@ -83,19 +83,26 @@ class OperationMatmul(Operation):
             f"run_matmul("
             f"{self.b}, {self.k}, {self.c}, "
             f"{self.weight}, {self.input}, {self.output}, "
-            f"{self.profile}"
+            f"&{self.profile}"
             f");"
         )
 
 
 @dataclass
-class OperationLockTrigger(Operation):
-    lock: int
+class OperationLockIncrement(Operation):
+    lock: Lock
+
+    def generate_code(self, f, state):
+        f.writeln(f"{self.lock}++;")
 
 
 @dataclass
 class OperationLockWait(Operation):
-    lock: int
+    lock: Lock
+    value: int
+
+    def generate_code(self, f, state):
+        f.writeln(f"while({self.lock} < {self.value});")
 
 
 @dataclass
@@ -260,7 +267,7 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
 
 
 def generate_meta(f, state: State):
-    f.writeln(f"u8 LOCKS[{state.next_lock}] = {{}};")
+    f.writeln(f"volatile u32 LOCKS[{state.next_lock}] = {{}};")
     f.writeln(f"u32 CYCLES[{len(state.cycle_names)}] = {{}};")
     f.writeln(f"struct Profile PROFILES[{state.next_profile}] = {{}};")
 
@@ -376,6 +383,26 @@ def compiler(onnx_path, scme, node_hw_performances):
             cycles_end = state.new_cycles(f"end core_{core}")
             state.operations_per_core[core].insert(0, OperationRecordCycles(cycles_start))
             state.operations_per_core[core].append(OperationRecordCycles(cycles_end))
+
+    # insert some dummy locking stuff
+    lock0 = state.new_lock()
+    lock1 = state.new_lock()
+
+    state.operations_per_core[0][0:0] = [
+        OperationLockWait(lock1, 1),
+        OperationLockIncrement(lock0),
+        OperationLockWait(lock1, 2),
+        OperationLockIncrement(lock0),
+        OperationLockIncrement(lock0),
+        OperationLockWait(lock1, 3),
+    ]
+    state.operations_per_core[1][0:0] = [
+        OperationLockIncrement(lock1),
+        OperationLockWait(lock0, 1),
+        OperationLockIncrement(lock1),
+        OperationLockWait(lock0, 3),
+        OperationLockIncrement(lock1),
+    ]
 
     print("Allocated buffers:")
     for name, buffer in state.buffers.items():
