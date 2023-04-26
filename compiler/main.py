@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Dict, List
 
+import numpy as np
 import onnx
 from networkx import DiGraph
 from onnx import ModelProto
@@ -11,7 +12,7 @@ from zigzag.classes.cost_model.cost_model import CostModelEvaluation
 from zigzag.classes.mapping.combined_mapping import Mapping
 
 from compiler.codegen import DataType, array_to_str
-from compiler.emulator import random_ima_input, random_ima_weight
+from compiler.ima_simulate import random_ima_input, random_ima_weight, ima_matmul
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.workload.computation_node import ComputationNode
 
@@ -147,9 +148,11 @@ class Buffer:
     # TODO remove this 1-to-1 correspondence between buffers and pointers in L1 and L2
     pointer_l1: Optional[Pointer]
     pointer_l2: Optional[Pointer]
+    pointer_l2_expected: Optional[Pointer] = None
 
-    constant: bool = False
     input: bool = False
+    constant: bool = False
+    sim_value: Optional[np.array] = None
 
     @property
     def size_bytes(self):
@@ -157,10 +160,16 @@ class Buffer:
         assert float(int(size_f)) == size_f
         return int(size_f)
 
+    @property
+    def computed(self) -> bool:
+        return not (self.input or self.constant)
+
 
 class State:
-    def __init__(self, onnx_model: ModelProto, core_count: int):
+    def __init__(self, onnx_model: ModelProto, core_count: int, sim: bool):
         self.onnx_model = onnx_model
+        self.sim = sim
+
         self.buffers: Dict[str, Buffer] = {}
         self.operations_per_core: List[List[Operation]] = [[] for _ in range(core_count)]
 
@@ -172,10 +181,16 @@ class State:
         # define inputs and constants
         for input in onnx_model.graph.input:
             shape = tuple(d.dim_value for d in list(input.type.tensor_type.shape.dim))
-            self.define_buffer(input.name, shape, DataType.Int8).input = True
+            buffer = self.define_buffer(input.name, shape, DataType.Int8)
+
+            buffer.input = True
+            buffer.sim_value = random_ima_input(shape)
         for const in onnx_model.graph.initializer:
             shape = tuple(const.dims)
-            self.define_buffer(const.name, shape, DataType.Int4).constant = True
+            buffer = self.define_buffer(const.name, shape, DataType.Int4)
+
+            buffer.constant = True
+            buffer.sim_value = random_ima_weight(shape)
 
         # built-in meta vars
         self.cycles_start_init = self.new_cycles("start init")
@@ -262,6 +277,9 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
             state.new_profile(),
         )
         state.push_operation(core, operation)
+
+        if state.sim:
+            output.sim_value = ima_matmul(input.sim_value, weight.sim_value)
     else:
         raise ValueError(f"Unrecognised equation {cn.equation}")
 
@@ -282,7 +300,7 @@ def generate_func_init(f, state: State):
         # TODO don't do all of this at once
         # copy inputs and weights to L1
         for name, buffer in state.buffers.items():
-            if buffer.input or buffer.constant:
+            if buffer.constant:
                 f.writeln(f"memcpy({buffer.pointer_l1}, {buffer.pointer_l2}, {buffer.size_bytes});")
 
         OperationRecordCycles(state.cycles_end_init).generate_code(f, state)
@@ -293,7 +311,12 @@ def generate_func_init(f, state: State):
 def generate_func_final(f, state: State):
     f.writeln("void generated_final() {")
     with f:
-        # TODO check if output is correct
+        for name, buffer in state.buffers.items():
+            if buffer.pointer_l2_expected is not None:
+                f.writeln(
+                    f"check_matches({buffer.pointer_l2_expected}, {buffer.pointer_l2}, {buffer.size_bytes}, \"{name}\");")
+
+        f.writeln()
 
         # print named cycle counters
         for index, name in enumerate(state.cycle_names):
@@ -309,6 +332,27 @@ def generate_func_core(f, state: State, core):
         for operation in state.operations_per_core[core]:
             operation.generate_code(f, state)
     f.writeln("}")
+
+
+def generate_data(f, d, state: State):
+    for name, buffer in state.buffers.items():
+        name = name_to_c_upper(name)
+
+        init = ""
+        if buffer.sim_value is not None:
+            sim_init = f" = DATA_{name}"
+            values_str = array_to_str(buffer.sim_value.flatten(), buffer.dtype)
+            print(f"#define DATA_{name} {values_str}", file=d)
+
+            if buffer.computed:
+                pointer_l2_expected = Pointer(f"DATA_{name_to_c_upper(name)}_EXPECTED_L2", MemoryKind.L2)
+                buffer.pointer_l2_expected = pointer_l2_expected
+                f.writeln(f"PI_L2 i8 {pointer_l2_expected}[{buffer.size_bytes}]{sim_init};")
+            else:
+                init = sim_init
+
+        f.writeln(f"PI_L2 i8 {buffer.pointer_l2}[{buffer.size_bytes}]{init};")
+        f.writeln(f"PI_L1 i8 {buffer.pointer_l1}[{buffer.size_bytes}];")
 
 
 def generate_code(state: State):
@@ -349,7 +393,7 @@ def compiler(onnx_path, scme, node_hw_performances):
     workload: DiGraph = scme.workload
     accelerator: Accelerator = scme.accelerator
 
-    state = State(onnx_model, len(accelerator.cores))
+    state = State(onnx_model, len(accelerator.cores), sim=True)
 
     for cn in workload:
         cn: ComputationNode
@@ -385,24 +429,24 @@ def compiler(onnx_path, scme, node_hw_performances):
             state.operations_per_core[core].append(OperationRecordCycles(cycles_end))
 
     # insert some dummy locking stuff
-    lock0 = state.new_lock()
-    lock1 = state.new_lock()
-
-    state.operations_per_core[0][0:0] = [
-        OperationLockWait(lock1, 1),
-        OperationLockIncrement(lock0),
-        OperationLockWait(lock1, 2),
-        OperationLockIncrement(lock0),
-        OperationLockIncrement(lock0),
-        OperationLockWait(lock1, 3),
-    ]
-    state.operations_per_core[1][0:0] = [
-        OperationLockIncrement(lock1),
-        OperationLockWait(lock0, 1),
-        OperationLockIncrement(lock1),
-        OperationLockWait(lock0, 3),
-        OperationLockIncrement(lock1),
-    ]
+    # lock0 = state.new_lock()
+    # lock1 = state.new_lock()
+    #
+    # state.operations_per_core[0][0:0] = [
+    #     OperationLockWait(lock1, 1),
+    #     OperationLockIncrement(lock0),
+    #     OperationLockWait(lock1, 2),
+    #     OperationLockIncrement(lock0),
+    #     OperationLockIncrement(lock0),
+    #     OperationLockWait(lock1, 3),
+    # ]
+    # state.operations_per_core[1][0:0] = [
+    #     OperationLockIncrement(lock1),
+    #     OperationLockWait(lock0, 1),
+    #     OperationLockIncrement(lock1),
+    #     OperationLockWait(lock0, 3),
+    #     OperationLockIncrement(lock1),
+    # ]
 
     print("Allocated buffers:")
     for name, buffer in state.buffers.items():
@@ -411,25 +455,3 @@ def compiler(onnx_path, scme, node_hw_performances):
     print("Generating code")
     state.freeze_meta()
     generate_code(state)
-
-
-def generate_data(f, d, state: State):
-    for name, buffer in state.buffers.items():
-        name = name_to_c_upper(name)
-
-        init = ""
-        if buffer.input or buffer.constant:
-            init = f" = DATA_{name}"
-
-            if buffer.input:
-                values = random_ima_input(buffer.shape)
-                dtype = DataType.Int8
-            else:
-                values = random_ima_weight(buffer.shape)
-                dtype = DataType.Int4
-
-            values_str = array_to_str(values.flatten(), dtype)
-            print(f"#define DATA_{name} {values_str}", file=d)
-
-        f.writeln(f"PI_L2 i8 DATA_{name}_L2[{buffer.size_bytes}]{init};")
-        f.writeln(f"PI_L1 i8 DATA_{name}_L1[{buffer.size_bytes}];")
