@@ -12,7 +12,7 @@ from zigzag.classes.mapping.combined_mapping import Mapping
 from compiler.codegen import DataType, array_to_bytes
 from compiler.ima_simulate import random_ima_input, random_ima_weight, ima_matmul
 from compiler.operation import Operation, MemoryKind, Pointer, Lock, Profile, Cycles, OperationCopy, OperationMatmul, \
-    Buffer, OperationPad, CyclesInfo, ProfileInfo, OperationRecordCycles
+    Buffer, OperationPad, CyclesInfo, ProfileInfo, OperationRecordCycles, OperationLockIncrement, OperationLockWait
 from compiler.plot_profile import plot_profile
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.workload.computation_node import ComputationNode
@@ -170,6 +170,7 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
         output_shape.append(end)
 
     output = state.define_buffer(output_name, tuple(output_shape), dtype=DataType.Int8, const=False)
+    output.ready_lock = state.new_lock()
 
     loop_ranges = cn.loop_ranges
     temporal = zcme.temporal_mapping
@@ -179,7 +180,17 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
 
     core = cn.get_core_allocation()
 
+    # TODO ensure no IMA contention?
+
     if cn.equation == 'O[b][k]+=A[b][c]*B[c][k]':
+        # wait for inputs
+        state.push_cycles(core, "start", "wait")
+        if input.ready_lock is not None:
+            state.push_operation(core, OperationLockWait(input.ready_lock, 1))
+        if weight.ready_lock is not None:
+            state.push_operation(core, OperationLockWait(weight.ready_lock, 1))
+        state.push_cycles(core, "end", "wait")
+
         # copy inputs
         state.push_cycles(core, "start", "input")
         state.push_operation(core, OperationCopy(input.pointer_l2, input.pointer_l3, input.size_bytes))
@@ -201,8 +212,9 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
         state.push_cycles(core, "start", "output")
         state.push_operation(core, OperationCopy(output.pointer_l2, output.pointer_l1, output.size_bytes))
         state.push_operation(core, OperationCopy(output.pointer_l3, output.pointer_l2, output.size_bytes))
-        state.push_operation(core, OperationPad())
+        state.push_operation(core, OperationLockIncrement(output.ready_lock))
         state.push_cycles(core, "end", "output")
+        state.push_operation(core, OperationPad())
 
         # simulate
         if state.sim:

@@ -38,6 +38,8 @@ class Pointer:
         return self.code
 
 
+# TODO rename lock to fence
+#   and add separate mutex, for IMA exclusion?
 @dataclass
 class Lock:
     index: int
@@ -164,6 +166,8 @@ class Buffer:
 
     pointer_l3_expected: Optional[Pointer] = None
     sim_value: Optional[np.array] = None
+
+    ready_lock: Optional[Lock] = None
 
     @property
     def size_bytes(self):
