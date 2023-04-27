@@ -408,6 +408,7 @@ def compiler(onnx_path, scme, node_hw_performances):
     workload: DiGraph = scme.workload
     accelerator: Accelerator = scme.accelerator
 
+    np.random.seed(0)
     state = State(onnx_model, len(accelerator.cores), sim=True)
 
     for cn in workload:

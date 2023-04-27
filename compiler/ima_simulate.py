@@ -3,21 +3,39 @@ import numpy as np
 from compiler.codegen import array_to_str, DataType
 
 
-def ima_sum(value, weight, adc_low: int, adc_high: int):
-    ps = 0
-    for (idx, w) in enumerate(weight):
-        ps += ((weight[idx] * 1.0) / 7) * ((value[idx] * 1.0) / 127)
-    if ps > adc_high:
-        ps = adc_high
-    if ps < -adc_low:
-        ps = -adc_low
-    ps_int = round(ps * (127 / (adc_high + adc_low)))
-    if ps_int > 127:
-        ps_int = 127
-    if ps_int < -127:
-        ps_int = -127
-    return ps_int
+def ima_sum(input, weight, adc_low: int, adc_high: int):
+    # matches operations in GVSOC simulator exactly
+    value = np.float32(0.0)
+    DAC_PRECISION = 8
+    STOR_DWIDTH = 4
+    ADC_PRECISION = 8
 
+    for i in range(len(weight)):
+        input_float = np.float32(input[i]) / np.float32((1 << (DAC_PRECISION - 1)) - 1)
+        weight_float = np.float32(weight[i])
+        value += input_float * weight_float / np.float32((1 << (STOR_DWIDTH - 1)) - 1)
+
+    if value > adc_high:
+        value = np.float32(adc_high)
+    elif value < -adc_low:
+        value = np.float32(adc_low)
+
+    # (float) (value * (((1 << (ADC_PRECISION - 1)) - 1))) / ((this->job->adc_high + this->job->adc_low))
+    value = value * np.float32((1 << (ADC_PRECISION - 1)) - 1) / np.float32(adc_high + adc_low)
+
+    if value >= ((1 << (ADC_PRECISION - 1)) - 1):
+        value = ((1 << (ADC_PRECISION - 1)) - 1)
+    elif value <= -((1 << (ADC_PRECISION - 1)) - 1):
+        value = -((1 << (ADC_PRECISION - 1)) - 1)
+
+    if value >= 0:
+        if value - int(value) >= 0.5:
+            return int(value) + 1
+        return int(value)
+    else:
+        if value - int(value) <= -0.5:
+            return int(value) - 1
+        return int(value)
 
 def random_ima_weight(shape):
     return np.random.randint(-7, 7, shape)
