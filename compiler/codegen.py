@@ -18,6 +18,12 @@ class DataType(enum.Enum):
 
 
 def array_to_str(data, data_type: DataType):
+    data_bytes = array_to_bytes(data, data_type)
+    result = "{" + ", ".join([f"0x{v:02x}" for v in data_bytes]) + "}"
+    return result
+
+
+def array_to_bytes(data, data_type: DataType):
     data = np.array(data)
     assert len(data.shape) == 1
 
@@ -28,5 +34,5 @@ def array_to_str(data, data_type: DataType):
     else:
         raise ValueError(f"unknown data type {data_type}")
 
-    result = "{" + ", ".join([f"0x{v:02x}" for v in data_flat]) + "}"
-    return result
+    data_byte = data_flat.astype(np.uint8)
+    return bytes(data_byte)

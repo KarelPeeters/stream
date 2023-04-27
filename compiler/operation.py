@@ -24,14 +24,18 @@ class MemoryKind(enum.Enum):
     def addressable(self):
         return self in (MemoryKind.L2, MemoryKind.L1)
 
+    @property
+    def ram(self):
+        return self == MemoryKind.L3
+
 
 @dataclass
 class Pointer:
-    symbol: str
+    code: str
     kind: MemoryKind
 
     def __str__(self):
-        return self.symbol
+        return self.code
 
 
 @dataclass
@@ -66,10 +70,18 @@ class OperationCopy(Operation):
     size_bytes: int
 
     def generate_code(self, f, state):
-        # TODO generate async copy instead?
-        # TODO support L3 here too?
-        assert self.dest.kind.addressable and self.src.kind.addressable
-        f.writeln(f"memcpy({self.dest}, {self.src}, {self.size_bytes});")
+        # TODO how to allow async copies?
+        if self.dest.kind.ram and self.src.kind.addressable:
+            f.writeln(f"pi_cl_ram_write_blocking(ram, {self.dest}, {self.src}, {self.size_bytes});")
+            return
+        if self.dest.kind.addressable and self.src.kind.ram:
+            f.writeln(f"pi_cl_ram_read_blocking(ram, {self.src}, {self.dest}, {self.size_bytes});")
+            return
+        if self.dest.kind.addressable and self.src.kind.addressable:
+            f.writeln(f"memcpy({self.dest}, {self.src}, {self.size_bytes});")
+            return
+
+        raise ValueError(f"Cannot copy [{self.dest}] <- [{self.src}]")
 
 
 @dataclass
@@ -120,17 +132,23 @@ class OperationRecordCycles(Operation):
 
 
 @dataclass
+class OperationPad(Operation):
+    def generate_code(self, f, state):
+        f.writeln()
+
+
+@dataclass
 class Buffer:
     shape: tuple
     dtype: DataType
+    const: bool
 
-    # TODO remove this 1-to-1 correspondence between buffers and pointers in L1 and L2
+    # TODO remove this 1-to-1 correspondence between buffers and pointers in various memory levels
     pointer_l1: Optional[Pointer]
     pointer_l2: Optional[Pointer]
-    pointer_l2_expected: Optional[Pointer] = None
+    pointer_l3: Optional[Pointer]
 
-    input: bool = False
-    constant: bool = False
+    pointer_l3_expected: Optional[Pointer] = None
     sim_value: Optional[np.array] = None
 
     @property
@@ -138,7 +156,3 @@ class Buffer:
         size_f = math.prod(self.shape) * self.dtype.size_bytes
         assert float(int(size_f)) == size_f
         return int(size_f)
-
-    @property
-    def computed(self) -> bool:
-        return not (self.input or self.constant)

@@ -9,10 +9,10 @@ from onnx import ModelProto
 from zigzag.classes.cost_model.cost_model import CostModelEvaluation
 from zigzag.classes.mapping.combined_mapping import Mapping
 
-from compiler.codegen import DataType, array_to_str
+from compiler.codegen import DataType, array_to_bytes
 from compiler.ima_simulate import random_ima_input, random_ima_weight, ima_matmul
 from compiler.operation import Operation, MemoryKind, Pointer, Lock, Profile, Cycles, OperationCopy, OperationMatmul, \
-    OperationRecordCycles, Buffer
+    OperationRecordCycles, Buffer, OperationPad
 from compiler.plot_profile import plot_profile
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.workload.computation_node import ComputationNode
@@ -44,6 +44,19 @@ class Output:
         self.indent = self.indent[:-4]
 
 
+class Allocator:
+    def __init__(self):
+        self.next_offset = 0
+
+    def alloc(self, size):
+        offset = self.next_offset
+        self.next_offset += size
+        return offset
+
+    def __len__(self):
+        return self.next_offset
+
+
 class State:
     def __init__(self, onnx_model: ModelProto, core_count: int, sim: bool):
         self.onnx_model = onnx_model
@@ -60,13 +73,13 @@ class State:
         # define inputs and constants
         for input in onnx_model.graph.input:
             shape = tuple(d.dim_value for d in list(input.type.tensor_type.shape.dim))
-            buffer = self.define_buffer(input.name, shape, DataType.Int8)
+            buffer = self.define_buffer(input.name, shape, DataType.Int8, const=True)
 
             buffer.input = True
             buffer.sim_value = random_ima_input(shape)
         for const in onnx_model.graph.initializer:
             shape = tuple(const.dims)
-            buffer = self.define_buffer(const.name, shape, DataType.Int4)
+            buffer = self.define_buffer(const.name, shape, DataType.Int4, const=True)
 
             buffer.constant = True
             buffer.sim_value = random_ima_weight(shape)
@@ -78,14 +91,22 @@ class State:
     def get_buffer(self, name):
         return self.buffers[name]
 
-    def define_buffer(self, name, shape: tuple, dtype: DataType) -> Buffer:
+    def define_buffer(self, name, shape: tuple, dtype: DataType, const: bool) -> Buffer:
         if name in self.buffers:
             raise KeyError(f"Buffer {name} already defined")
+        upper = name_to_c_upper(name)
 
-        pointer_l1 = Pointer(f"DATA_{name_to_c_upper(name)}_L1", MemoryKind.L1)
-        pointer_l2 = Pointer(f"DATA_{name_to_c_upper(name)}_L2", MemoryKind.L2)
+        pointer_l1 = Pointer(f"L1_BUFFER_{upper}", MemoryKind.L1)
+        pointer_l2 = Pointer(f"L2_BUFFER_{upper}", MemoryKind.L2)
+        if const:
+            pointer_l3 = Pointer(f"(L3_CONST_START + L3_CONST_OFFSET_{upper})", MemoryKind.L3)
+        else:
+            pointer_l3 = Pointer(f"(L3_DYN_START + L3_DYN_OFFSET_{upper})", MemoryKind.L3)
 
-        buffer = Buffer(shape=shape, dtype=dtype, pointer_l1=pointer_l1, pointer_l2=pointer_l2)
+        buffer = Buffer(
+            shape=shape, dtype=dtype, const=const,
+            pointer_l1=pointer_l1, pointer_l2=pointer_l2, pointer_l3=pointer_l3
+        )
         self.buffers[name] = buffer
         return buffer
 
@@ -120,7 +141,6 @@ def generate_includes(f):
     f.writeln('#include <bsp/bsp.h>')
     f.writeln('#include "run_layer.h"')
     f.writeln('#include "util.h"')
-    f.writeln('#include "generated_data.h"')
 
 
 def name_to_c_upper(name: str):
@@ -140,7 +160,7 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
         assert start == 0
         output_shape.append(end)
 
-    output = state.define_buffer(output_name, tuple(output_shape), dtype=DataType.Int8)
+    output = state.define_buffer(output_name, tuple(output_shape), dtype=DataType.Int8, const=False)
 
     loop_ranges = cn.loop_ranges
     temporal = zcme.temporal_mapping
@@ -152,7 +172,9 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
 
     if cn.equation == 'O[b][k]+=A[b][c]*B[c][k]':
         # copy inputs
+        state.push_operation(core, OperationCopy(input.pointer_l2, input.pointer_l3, input.size_bytes))
         state.push_operation(core, OperationCopy(input.pointer_l1, input.pointer_l2, input.size_bytes))
+        state.push_operation(core, OperationCopy(weight.pointer_l2, weight.pointer_l3, weight.size_bytes))
         state.push_operation(core, OperationCopy(weight.pointer_l1, weight.pointer_l2, weight.size_bytes))
 
         # real operation
@@ -164,6 +186,8 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
 
         # copy output
         state.push_operation(core, OperationCopy(output.pointer_l2, output.pointer_l1, output.size_bytes))
+        state.push_operation(core, OperationCopy(output.pointer_l3, output.pointer_l2, output.size_bytes))
+        state.push_operation(core, OperationPad())
 
         # simulate
         if state.sim:
@@ -173,18 +197,36 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
 
 
 def generate_meta(f, state: State):
-    f.writeln(f"volatile u32 LOCKS[{state.next_lock}] = {{}};")
-    f.writeln(f"u32 CYCLES[{len(state.cycle_names)}] = {{}};")
-    f.writeln(f"struct Profile PROFILES[{len(state.profile_names)}] = {{}};")
+    f.writeln("static struct pi_device *ram = NULL;")
+    f.writeln(f"static volatile u32 LOCKS[{state.next_lock}] = {{}};")
+    f.writeln(f"static u32 CYCLES[{len(state.cycle_names)}] = {{}};")
+    f.writeln(f"static struct Profile PROFILES[{len(state.profile_names)}] = {{}};")
 
 
 def generate_func_init(f, state: State):
-    f.writeln("void generated_init() {")
+    f.writeln("i32 generated_init(struct pi_device *ram_param, u32 l3_const_start, u32 l3_const_file_size) {")
 
     with f:
         OperationRecordCycles(state.cycles_start_init).generate_code(f, state)
-        # put init code here?
-        # TODO maybe switch to list of operations for init too?
+
+        f.writeln("ram = ram_param;")
+        f.writeln()
+
+        f.writeln("if (l3_const_file_size != L3_CONST_SIZE) {")
+        with f:
+            f.writeln("printf(\"ERROR: L3 const size mismatch\\n\");")
+            f.writeln("return -1;")
+        f.writeln("}")
+        f.writeln()
+
+        f.writeln("L3_CONST_START = l3_const_start;")
+        f.writeln("if (pi_ram_alloc(ram_param, &L3_DYN_START, L3_DYN_SIZE)) {")
+        with f:
+            f.writeln("printf(\"ERROR: Failed to allocate L3_DYN\\n\");")
+            f.writeln("return -2;")
+        f.writeln("}")
+        f.writeln()
+
         OperationRecordCycles(state.cycles_end_init).generate_code(f, state)
 
     f.writeln("}")
@@ -194,9 +236,9 @@ def generate_func_final(f, state: State):
     f.writeln("void generated_final() {")
     with f:
         for name, buffer in state.buffers.items():
-            if buffer.pointer_l2_expected is not None:
+            if not buffer.const and buffer.pointer_l3_expected is not None:
                 f.writeln(
-                    f"verify_output({buffer.pointer_l2_expected}, {buffer.pointer_l2}, {buffer.size_bytes}, \"{name}\");")
+                    f"verify_output(ram, {buffer.pointer_l3_expected}, {buffer.pointer_l2}, {buffer.size_bytes}, \"{name}\");")
 
         f.writeln()
 
@@ -220,39 +262,56 @@ def generate_func_core(f, state: State, core):
     f.writeln("}")
 
 
-def generate_data(f, d, state: State):
+def generate_data(f, state: State, d_bin):
+    alloc_const = Allocator()
+    alloc_dyn = Allocator()
+
     for name, buffer in state.buffers.items():
-        name = name_to_c_upper(name)
+        upper = name_to_c_upper(name)
 
-        init = ""
-        if buffer.sim_value is not None:
-            sim_init = f" = DATA_{name}"
-            values_str = array_to_str(buffer.sim_value.flatten(), buffer.dtype)
-            print(f"#define DATA_{name} {values_str}", file=d)
-
-            if buffer.computed:
-                pointer_l2_expected = Pointer(f"DATA_{name_to_c_upper(name)}_EXPECTED_L2", MemoryKind.L2)
-                buffer.pointer_l2_expected = pointer_l2_expected
-                f.writeln(f"PI_L2 i8 {pointer_l2_expected}[{buffer.size_bytes}]{sim_init};")
-            else:
-                init = sim_init
-
-        f.writeln(f"PI_L2 i8 {buffer.pointer_l2}[{buffer.size_bytes}]{init};")
         f.writeln(f"PI_L1 i8 {buffer.pointer_l1}[{buffer.size_bytes}];")
+        f.writeln(f"PI_L2 i8 {buffer.pointer_l2}[{buffer.size_bytes}];")
+
+        if buffer.sim_value is not None:
+            offset = alloc_const.alloc(buffer.size_bytes)
+            offset_name = f"L3_CONST_OFFSET_{upper}"
+            f.writeln(f"#define {offset_name} {offset}")
+
+            pointer = Pointer(f"(L3_CONST_START + {offset_name})", MemoryKind.L3)
+            if buffer.const:
+                assert buffer.pointer_l3 == pointer
+            else:
+                buffer.pointer_l3_expected = pointer
+
+            value_bytes = array_to_bytes(buffer.sim_value.flatten(), buffer.dtype)
+            assert len(value_bytes) == buffer.size_bytes
+            d_bin.write(value_bytes)
+
+        if not buffer.const:
+            offset = alloc_dyn.alloc(buffer.size_bytes)
+            offset_name = f"L3_DYN_OFFSET_{upper}"
+            # TODO split into offset and start again
+            f.writeln(f"#define {offset_name} {offset}")
+
+    f.writeln()
+    f.writeln("static u32 L3_CONST_START = 0;")
+    f.writeln("static u32 L3_DYN_START = 0;")
+    f.writeln(f"#define L3_CONST_SIZE {len(alloc_const)}")
+    f.writeln(f"#define L3_DYN_SIZE {len(alloc_dyn)}")
 
 
 def generate_code(state: State, project_path):
-    source_path = os.path.join(project_path, "generated.c")
-    data_path = os.path.join(project_path, "generated_data.h")
+    path_source = os.path.join(project_path, "generated.c")
+    path_data_bin = os.path.join(project_path, "generated_data.bin")
 
-    with open(source_path, "w") as source_file, open(data_path, "w") as data_file:
-        f = Output(source_file)
+    with open(path_source, "w") as file_source, open(path_data_bin, "wb") as file_data_bin:
+        f = Output(file_source)
 
         generate_includes(f)
         f.writeln()
         generate_meta(f, state)
         f.writeln()
-        generate_data(f, data_file, state)
+        generate_data(f, state, file_data_bin)
         f.writeln()
 
         generate_func_init(f, state)
