@@ -1,9 +1,5 @@
-import enum
-import math
 import os
 import subprocess
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Optional, Dict, List
 
 import numpy as np
@@ -15,119 +11,11 @@ from zigzag.classes.mapping.combined_mapping import Mapping
 
 from compiler.codegen import DataType, array_to_str
 from compiler.ima_simulate import random_ima_input, random_ima_weight, ima_matmul
+from compiler.operation import Operation, MemoryKind, Pointer, Lock, Profile, Cycles, OperationCopy, OperationMatmul, \
+    OperationRecordCycles, Buffer
 from compiler.plot_profile import plot_profile
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.workload.computation_node import ComputationNode
-
-
-class Operation(ABC):
-    @abstractmethod
-    def generate_code(self, f, state):
-        raise NotImplementedError()
-
-
-class MemoryKind(enum.Enum):
-    L3 = enum.auto()
-    L2 = enum.auto()
-    L1 = enum.auto()
-
-    @property
-    def addressable(self):
-        return self in (MemoryKind.L2, MemoryKind.L1)
-
-
-@dataclass
-class Pointer:
-    symbol: str
-    kind: MemoryKind
-
-    def __str__(self):
-        return self.symbol
-
-
-@dataclass
-class Lock:
-    index: int
-
-    def __str__(self):
-        return f"LOCKS[{self.index}]"
-
-
-@dataclass
-class Profile:
-    index: int
-
-    def __str__(self):
-        return f"PROFILES[{self.index}]"
-
-
-@dataclass
-class Cycles:
-    index: int
-    name: str
-
-    def __str__(self):
-        return f"CYCLES[{self.index}]"
-
-
-@dataclass
-class OperationCopy(Operation):
-    dest: Pointer
-    src: Pointer
-    size_bytes: int
-
-    def generate_code(self, f, state):
-        # TODO generate async copy instead?
-        # TODO support L3 here too?
-        assert self.dest.kind.addressable and self.src.kind.addressable
-        f.writeln(f"memcpy({self.dest}, {self.src}, {self.size_bytes});")
-
-
-@dataclass
-class OperationMatmul(Operation):
-    b: int
-    k: int
-    c: int
-
-    input: Pointer
-    weight: Pointer
-    output: Pointer
-
-    profile: Profile
-
-    def generate_code(self, f, state):
-        f.writeln(
-            f"run_matmul("
-            f"{self.b}, {self.k}, {self.c}, "
-            f"{self.weight}, {self.input}, {self.output}, "
-            f"&{self.profile}"
-            f");"
-        )
-
-
-@dataclass
-class OperationLockIncrement(Operation):
-    lock: Lock
-
-    def generate_code(self, f, state):
-        f.writeln(f"{self.lock}++;")
-
-
-@dataclass
-class OperationLockWait(Operation):
-    lock: Lock
-    value: int
-
-    def generate_code(self, f, state):
-        f.writeln(f"while({self.lock} < {self.value});")
-
-
-@dataclass
-class OperationRecordCycles(Operation):
-    cycles: Cycles
-
-    def generate_code(self, f, state):
-        f.writeln(f"{self.cycles} = cycles(); // {self.cycles.name}")
 
 
 class Output:
@@ -156,31 +44,6 @@ class Output:
         self.indent = self.indent[:-4]
 
 
-@dataclass
-class Buffer:
-    shape: tuple
-    dtype: DataType
-
-    # TODO remove this 1-to-1 correspondence between buffers and pointers in L1 and L2
-    pointer_l1: Optional[Pointer]
-    pointer_l2: Optional[Pointer]
-    pointer_l2_expected: Optional[Pointer] = None
-
-    input: bool = False
-    constant: bool = False
-    sim_value: Optional[np.array] = None
-
-    @property
-    def size_bytes(self):
-        size_f = math.prod(self.shape) * self.dtype.size_bytes
-        assert float(int(size_f)) == size_f
-        return int(size_f)
-
-    @property
-    def computed(self) -> bool:
-        return not (self.input or self.constant)
-
-
 class State:
     def __init__(self, onnx_model: ModelProto, core_count: int, sim: bool):
         self.onnx_model = onnx_model
@@ -190,7 +53,7 @@ class State:
         self.operations_per_core: List[List[Operation]] = [[] for _ in range(core_count)]
 
         self.next_lock = 0
-        self.next_profile = 0
+        self.profile_names = []
         self.cycle_names = []
         self.meta_frozen = False
 
@@ -242,10 +105,10 @@ class State:
         self.cycle_names.append(name)
         return Cycles(index, name)
 
-    def new_profile(self) -> Profile:
+    def new_profile(self, name: str) -> Profile:
         assert not self.meta_frozen
-        index = self.next_profile
-        self.next_profile += 1
+        index = len(self.profile_names)
+        self.profile_names.append(name)
         return Profile(index)
 
     def freeze_meta(self):
@@ -295,7 +158,7 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
         state.push_operation(core, OperationMatmul(
             b=dim_size["B"], k=dim_size["K"], c=dim_size["C"],
             weight=weight.pointer_l1, input=input.pointer_l1, output=output.pointer_l1,
-            profile=state.new_profile(),
+            profile=state.new_profile(cn.name),
         ))
 
         # copy output
@@ -311,7 +174,7 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
 def generate_meta(f, state: State):
     f.writeln(f"volatile u32 LOCKS[{state.next_lock}] = {{}};")
     f.writeln(f"u32 CYCLES[{len(state.cycle_names)}] = {{}};")
-    f.writeln(f"struct Profile PROFILES[{state.next_profile}] = {{}};")
+    f.writeln(f"struct Profile PROFILES[{len(state.profile_names)}] = {{}};")
 
 
 def generate_func_init(f, state: State):
@@ -340,6 +203,10 @@ def generate_func_final(f, state: State):
         for index, name in enumerate(state.cycle_names):
             cycles = Cycles(index, name)
             f.writeln(f"printf(\"== profile == %d: {name}\\n\", {cycles});")
+
+        # print profiles
+        for index, name in enumerate(state.profile_names):
+            f.writeln(f"print_profile(&{Profile(index)}, \"{name}\");")
 
     f.writeln("}")
 
