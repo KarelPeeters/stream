@@ -204,7 +204,7 @@ def generate_meta(f, state: State):
 
 
 def generate_func_init(f, state: State):
-    f.writeln("i32 generated_init(struct pi_device *ram_param, u32 l3_const_start, u32 l3_const_file_size) {")
+    f.writeln("i32 generated_init_fabric(struct pi_device *ram_param, u32 l3_const_start, u32 l3_const_file_size) {")
 
     with f:
         OperationRecordCycles(state.cycles_start_init).generate_code(f, state)
@@ -229,14 +229,23 @@ def generate_func_init(f, state: State):
 
         OperationRecordCycles(state.cycles_end_init).generate_code(f, state)
 
+        f.writeln("return 0;")
     f.writeln("}")
+    f.writeln()
+
+    f.writeln("void generated_init_cluster() {}")
 
 
 def generate_func_final(f, state: State):
-    f.writeln("void generated_final() {")
+    f.writeln("void generated_final_cluster() {}")
+    f.writeln()
+
+    f.writeln("void generated_final_fabric() {")
     with f:
+        # verify outputs
         for name, buffer in state.buffers.items():
             if not buffer.const and buffer.pointer_l3_expected is not None:
+                # TODO compare to L3 buffer
                 f.writeln(
                     f"verify_output(ram, {buffer.pointer_l3_expected}, {buffer.pointer_l2}, {buffer.size_bytes}, \"{name}\");")
 
