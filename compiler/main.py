@@ -207,7 +207,8 @@ def generate_func_init(f, state: State):
     f.writeln("i32 generated_init_fabric(struct pi_device *ram_param, u32 l3_const_start, u32 l3_const_file_size) {")
 
     with f:
-        OperationRecordCycles(state.cycles_start_init).generate_code(f, state)
+        # TODO re-enable once we can get this synchronized
+        # OperationRecordCycles(state.cycles_start_init).generate_code(f, state)
 
         f.writeln("ram = ram_param;")
         f.writeln()
@@ -227,7 +228,8 @@ def generate_func_init(f, state: State):
         f.writeln("}")
         f.writeln()
 
-        OperationRecordCycles(state.cycles_end_init).generate_code(f, state)
+        # TODO re-enable once we can get this synchronized
+        # OperationRecordCycles(state.cycles_end_init).generate_code(f, state)
 
         f.writeln("return 0;")
     f.writeln("}")
