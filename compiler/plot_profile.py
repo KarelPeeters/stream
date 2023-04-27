@@ -8,17 +8,12 @@ pattern_end = re.compile(r"^end (.*)$")
 pattern_layer = re.compile(r"^layer(\d+)$")
 
 
-def main():
-    path = r"\\wsl.localhost\Ubuntu\home\karel\new-attempt\pulp-sdk\applications\custom\output.txt"
-
-    with open(path, "r") as f:
-        data = f.read()
-
+def plot_profile(stdout: str, block: bool=True):
     item_last_time = {}
     item_slices = {}
     curr_layer = None
 
-    for line in data.splitlines():
+    for line in stdout.splitlines():
         if m := pattern_profile.match(line):
             time = int(m.group(1))
             message = m.group(2)
@@ -64,13 +59,21 @@ def main():
 
     for i, (item, slices) in enumerate(item_slices.items()):
         ax = axes[i]
-        ax.set_ylabel(item, rotation=0, labelpad=50)
+        # ax.set_ylabel(item, rotation=0, labelpad=50)
+        ax.set_ylabel(item)
         for (start, end, layer) in slices:
             color = layer_colors[layer] if layer is not None else "k"
             ax.axvspan(start, end, facecolor=color, alpha=0.5)
 
     # fig.tight_layout()
-    plt.show()
+    plt.show(block=block)
+
+
+def main():
+    path = r"\\wsl.localhost\Ubuntu\home\karel\new-attempt\pulp-sdk\applications\custom\output.txt"
+    with open(path, "r") as f:
+        data = f.read()
+    plot_profile(data)
 
 
 if __name__ == '__main__':

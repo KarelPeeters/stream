@@ -4,7 +4,7 @@ from typing import Generator
 
 from zigzag.classes.stages import *
 
-from compiler.main import compiler
+from compiler.main import compile_and_run
 from stream.api_edited import save_graph
 from stream.classes.stages import *
 
@@ -110,7 +110,9 @@ def main():
     with open(node_hw_performances_path, "rb") as f:
         node_hw_performances = pickle.load(file=f)
 
-    compiler(workload, scme[0], node_hw_performances)
+    pulp_sdk_path = r"~/new-attempt/pulp-sdk"
+    project_path = r"~/new-attempt/pulp-sdk/applications/custom"
+    compile_and_run(workload, scme[0], node_hw_performances, pulp_sdk_path, project_path, run=True)
 
 
 if __name__ == "__main__":

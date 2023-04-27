@@ -1,5 +1,7 @@
 import enum
 import math
+import os
+import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Dict, List
@@ -13,6 +15,7 @@ from zigzag.classes.mapping.combined_mapping import Mapping
 
 from compiler.codegen import DataType, array_to_str
 from compiler.ima_simulate import random_ima_input, random_ima_weight, ima_matmul
+from compiler.plot_profile import plot_profile
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.workload.computation_node import ComputationNode
 
@@ -370,9 +373,9 @@ def generate_data(f, d, state: State):
         f.writeln(f"PI_L1 i8 {buffer.pointer_l1}[{buffer.size_bytes}];")
 
 
-def generate_code(state: State):
-    source_path = r"\\wsl.localhost\Ubuntu\home\karel\new-attempt\pulp-sdk\applications\custom\generated.c"
-    data_path = r"\\wsl.localhost\Ubuntu\home\karel\new-attempt\pulp-sdk\applications\custom\layer_weights.h"
+def generate_code(state: State, project_path):
+    source_path = os.path.join(project_path, "generated.c")
+    data_path = os.path.join(project_path, "layer_weights.h")
 
     with open(source_path, "w") as source_file, open(data_path, "w") as data_file:
         f = Output(source_file)
@@ -394,7 +397,7 @@ def generate_code(state: State):
             f.writeln()
 
 
-def compiler(onnx_path, scme, node_hw_performances):
+def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, project_path, run: bool):
     print("compiler")
     print(onnx_path)
     print(scme)
@@ -444,30 +447,31 @@ def compiler(onnx_path, scme, node_hw_performances):
             state.operations_per_core[core].insert(0, OperationRecordCycles(cycles_start))
             state.operations_per_core[core].append(OperationRecordCycles(cycles_end))
 
-    # insert some dummy locking stuff
-    # lock0 = state.new_lock()
-    # lock1 = state.new_lock()
-    #
-    # state.operations_per_core[0][0:0] = [
-    #     OperationLockWait(lock1, 1),
-    #     OperationLockIncrement(lock0),
-    #     OperationLockWait(lock1, 2),
-    #     OperationLockIncrement(lock0),
-    #     OperationLockIncrement(lock0),
-    #     OperationLockWait(lock1, 3),
-    # ]
-    # state.operations_per_core[1][0:0] = [
-    #     OperationLockIncrement(lock1),
-    #     OperationLockWait(lock0, 1),
-    #     OperationLockIncrement(lock1),
-    #     OperationLockWait(lock0, 3),
-    #     OperationLockIncrement(lock1),
-    # ]
-
     print("Allocated buffers:")
     for name, buffer in state.buffers.items():
         print(f"  {name}: {buffer.shape}")
 
     print("Generating code")
     state.freeze_meta()
-    generate_code(state)
+
+    wsl_home = subprocess.check_output(["wsl", "wslpath", "-w", "~"]).decode("utf-8").strip()
+    generate_code(state, project_path.replace("~", wsl_home))
+
+    if run:
+        print("Running code")
+        commands = [
+            f"cd {pulp_sdk_path}",
+            "source configs/pulp-open.sh",
+            "export PATH=/opt/riscv/bin:$PATH",
+            "export PULP_RISCV_GCC_TOOLCHAIN=/opt/riscv/",
+
+            f"cd {project_path}",
+            # TODO add clean if number of cores changed
+            "make all run"
+        ]
+        result = subprocess.run(["wsl", *"; ".join(commands).split(" ")], stdout=subprocess.PIPE)
+        stdout = result.stdout.decode("utf-8")
+        print(stdout)
+        result.check_returncode()
+
+        plot_profile(stdout)
