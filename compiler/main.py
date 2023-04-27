@@ -119,7 +119,8 @@ def generate_includes(f):
     f.writeln('#include "pmsis.h"')
     f.writeln('#include <bsp/bsp.h>')
     f.writeln('#include "run_layer.h"')
-    f.writeln('#include "layer_weights.h"')
+    f.writeln('#include "util.h"')
+    f.writeln('#include "generated_data.h"')
 
 
 def name_to_c_upper(name: str):
@@ -242,7 +243,7 @@ def generate_data(f, d, state: State):
 
 def generate_code(state: State, project_path):
     source_path = os.path.join(project_path, "generated.c")
-    data_path = os.path.join(project_path, "layer_weights.h")
+    data_path = os.path.join(project_path, "generated_data.h")
 
     with open(source_path, "w") as source_file, open(data_path, "w") as data_file:
         f = Output(source_file)
