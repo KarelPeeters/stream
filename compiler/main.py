@@ -245,9 +245,8 @@ def generate_func_final(f, state: State):
         # verify outputs
         for name, buffer in state.buffers.items():
             if not buffer.const and buffer.pointer_l3_expected is not None:
-                # TODO compare to L3 buffer
                 f.writeln(
-                    f"verify_output(ram, {buffer.pointer_l3_expected}, {buffer.pointer_l2}, {buffer.size_bytes}, \"{name}\");")
+                    f"verify_output(ram, {buffer.pointer_l3_expected}, {buffer.pointer_l3}, {buffer.size_bytes}, \"{name}\");")
 
         f.writeln()
 
