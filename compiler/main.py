@@ -12,7 +12,7 @@ from zigzag.classes.mapping.combined_mapping import Mapping
 from compiler.codegen import DataType, array_to_bytes
 from compiler.ima_simulate import random_ima_input, random_ima_weight, ima_matmul
 from compiler.operation import Operation, MemoryKind, Pointer, Lock, Profile, Cycles, OperationCopy, OperationMatmul, \
-    OperationRecordCycles, Buffer, OperationPad
+    Buffer, OperationPad, CyclesInfo, ProfileInfo, OperationRecordCycles
 from compiler.plot_profile import plot_profile
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.workload.computation_node import ComputationNode
@@ -66,8 +66,8 @@ class State:
         self.operations_per_core: List[List[Operation]] = [[] for _ in range(core_count)]
 
         self.next_lock = 0
-        self.profile_names = []
-        self.cycle_names = []
+        self.profile_infos: List[ProfileInfo] = []
+        self.cycle_infos: List[CyclesInfo] = []
         self.meta_frozen = False
 
         # define inputs and constants
@@ -85,8 +85,8 @@ class State:
             buffer.sim_value = random_ima_weight(shape)
 
         # built-in meta vars
-        self.cycles_start_init = self.new_cycles("start init")
-        self.cycles_end_init = self.new_cycles("end init")
+        # self.cycles_start_init = self.new_cycles("start init")
+        # self.cycles_end_init = self.new_cycles("end init")
 
     def get_buffer(self, name):
         return self.buffers[name]
@@ -113,6 +113,11 @@ class State:
     def push_operation(self, core: int, operation: Operation):
         self.operations_per_core[core].append(operation)
 
+    def push_cycles(self, core: int, kind: str, name: str):
+        info = CyclesInfo(core=f"core_{core}", kind=kind, name=name)
+        cycles = self.new_cycles(info)
+        self.push_operation(core, OperationRecordCycles(cycles))
+
     # TODO reduce code duplication here
     def new_lock(self) -> Lock:
         assert not self.meta_frozen
@@ -120,17 +125,21 @@ class State:
         self.next_lock += 1
         return Lock(index)
 
-    def new_cycles(self, name: str) -> Cycles:
+    def new_profile(self, info: ProfileInfo) -> Profile:
+        assert isinstance(info, ProfileInfo)
         assert not self.meta_frozen
-        index = len(self.cycle_names)
-        self.cycle_names.append(name)
-        return Cycles(index, name)
 
-    def new_profile(self, name: str) -> Profile:
+        index = len(self.profile_infos)
+        self.profile_infos.append(info)
+        return Profile(index, info)
+
+    def new_cycles(self, info: CyclesInfo) -> Cycles:
+        assert isinstance(info, CyclesInfo)
         assert not self.meta_frozen
-        index = len(self.profile_names)
-        self.profile_names.append(name)
-        return Profile(index)
+
+        index = len(self.cycle_infos)
+        self.cycle_infos.append(info)
+        return Cycles(index, info)
 
     def freeze_meta(self):
         self.meta_frozen = True
@@ -172,22 +181,28 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
 
     if cn.equation == 'O[b][k]+=A[b][c]*B[c][k]':
         # copy inputs
+        state.push_cycles(core, "start", "input")
         state.push_operation(core, OperationCopy(input.pointer_l2, input.pointer_l3, input.size_bytes))
         state.push_operation(core, OperationCopy(input.pointer_l1, input.pointer_l2, input.size_bytes))
         state.push_operation(core, OperationCopy(weight.pointer_l2, weight.pointer_l3, weight.size_bytes))
         state.push_operation(core, OperationCopy(weight.pointer_l1, weight.pointer_l2, weight.size_bytes))
+        state.push_cycles(core, "end", "input")
 
         # real operation
+        state.push_cycles(core, "start", "calc")
         state.push_operation(core, OperationMatmul(
             b=dim_size["B"], k=dim_size["K"], c=dim_size["C"],
             weight=weight.pointer_l1, input=input.pointer_l1, output=output.pointer_l1,
-            profile=state.new_profile(cn.name),
+            profile=state.new_profile(ProfileInfo(core=f"core_{core}_mm", name="matmul")),
         ))
+        state.push_cycles(core, "end", "calc")
 
         # copy output
+        state.push_cycles(core, "start", "output")
         state.push_operation(core, OperationCopy(output.pointer_l2, output.pointer_l1, output.size_bytes))
         state.push_operation(core, OperationCopy(output.pointer_l3, output.pointer_l2, output.size_bytes))
         state.push_operation(core, OperationPad())
+        state.push_cycles(core, "end", "output")
 
         # simulate
         if state.sim:
@@ -199,8 +214,8 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
 def generate_meta(f, state: State):
     f.writeln("static struct pi_device *ram = NULL;")
     f.writeln(f"static volatile u32 LOCKS[{state.next_lock}] = {{}};")
-    f.writeln(f"static u32 CYCLES[{len(state.cycle_names)}] = {{}};")
-    f.writeln(f"static struct Profile PROFILES[{len(state.profile_names)}] = {{}};")
+    f.writeln(f"static u32 CYCLES[{len(state.cycle_infos)}] = {{}};")
+    f.writeln(f"static struct Profile PROFILES[{len(state.profile_infos)}] = {{}};")
 
 
 def generate_func_init(f, state: State):
@@ -253,13 +268,14 @@ def generate_func_final(f, state: State):
         f.writeln()
 
         # print named cycle counters
-        for index, name in enumerate(state.cycle_names):
-            cycles = Cycles(index, name)
-            f.writeln(f"printf(\"== profile == %d: {name}\\n\", {cycles});")
+        for index, info in enumerate(state.cycle_infos):
+            cycles = Cycles(index, info)
+            f.writeln(f"printf(\"== profile == %d == {info.core} == {info.kind} == {info.name}\\n\", {cycles});")
 
         # print profiles
-        for index, name in enumerate(state.profile_names):
-            f.writeln(f"print_profile(&{Profile(index)}, \"{name}\");")
+        for index, info in enumerate(state.profile_infos):
+            profile = Profile(index, info)
+            f.writeln(f"print_profile(&{profile}, \"{info.core}\", \"{info.name}\");")
 
     f.writeln("}")
 
@@ -377,12 +393,12 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
         visit_node(state, cn, zcme)
 
     # insert some additional profiling
-    for core in range(len(state.operations_per_core)):
-        if len(state.operations_per_core[core]) > 0:
-            cycles_start = state.new_cycles(f"start core_{core}")
-            cycles_end = state.new_cycles(f"end core_{core}")
-            state.operations_per_core[core].insert(0, OperationRecordCycles(cycles_start))
-            state.operations_per_core[core].append(OperationRecordCycles(cycles_end))
+    # for core in range(len(state.operations_per_core)):
+    #     if len(state.operations_per_core[core]) > 0:
+    #         cycles_start = state.new_cycles(f"start core_{core}")
+    #         cycles_end = state.new_cycles(f"end core_{core}")
+    #         state.operations_per_core[core].insert(0, OperationRecordCycles(cycles_start))
+    #         state.operations_per_core[core].append(OperationRecordCycles(cycles_end))
 
     print("Allocated buffers:")
     for name, buffer in state.buffers.items():
@@ -408,7 +424,11 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
         ]
         result = subprocess.run(["wsl", *"; ".join(commands).split(" ")], stdout=subprocess.PIPE)
         stdout = result.stdout.decode("utf-8")
+
         print(stdout)
+        with open("outputs/stdout.txt", "w") as f:
+            f.write(stdout)
+
         result.check_returncode()
 
         plot_profile(stdout)

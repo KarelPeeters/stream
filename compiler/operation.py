@@ -47,17 +47,31 @@ class Lock:
 
 
 @dataclass
+class ProfileInfo:
+    core: str
+    name: str
+
+
+@dataclass
 class Profile:
     index: int
+    info: ProfileInfo
 
     def __str__(self):
         return f"PROFILES[{self.index}]"
 
 
 @dataclass
+class CyclesInfo:
+    core: str
+    kind: str
+    name: str
+
+
+@dataclass
 class Cycles:
     index: int
-    name: str
+    info: CyclesInfo
 
     def __str__(self):
         return f"CYCLES[{self.index}]"
@@ -128,7 +142,7 @@ class OperationRecordCycles(Operation):
     cycles: Cycles
 
     def generate_code(self, f, state):
-        f.writeln(f"{self.cycles} = cycles(); // {self.cycles.name}")
+        f.writeln(f"{self.cycles} = cycles(); // {self.cycles.info}")
 
 
 @dataclass

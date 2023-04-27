@@ -1,76 +1,71 @@
 import re
 
+import matplotlib
 import matplotlib.pyplot as plt
 
-pattern_profile = re.compile(r"^== profile == (\d+): (.*)$")
-pattern_start = re.compile(r"^start (.*)$")
-pattern_end = re.compile(r"^end (.*)$")
-pattern_layer = re.compile(r"^layer(\d+)$")
+pattern_profile = re.compile(r"^== profile == (\d+) == ([^=]+) == ([^=]+) == ([^=]+)$")
 
 
-def plot_profile(stdout: str, block: bool=True):
-    item_last_time = {}
-    item_slices = {}
-    curr_layer = None
+def plot_profile(stdout: str, block: bool = True):
+    core_slices = {}
+    key_last_time = {}
+    names = set()
 
     for line in stdout.splitlines():
         if m := pattern_profile.match(line):
-            time = int(m.group(1))
-            message = m.group(2)
+            time, core, kind, name = m.groups()
+            time = int(time)
+            key = (core, name)
+            names.add(name)
 
-            if m_start := pattern_start.match(message):
-                item = m_start.group(1)
-                # print(f"start {time} {item}")
-                if item in item_last_time:
-                    print(f"warning: item already started {item}")
-                item_last_time[item] = time
+            if kind == "start":
+                if key in key_last_time:
+                    print(f"warning: name already started {core, name}")
+                key_last_time[key] = time
 
-                if m_layer := pattern_layer.match(item):
-                    curr_layer = int(m_layer.group(1))
-
-            if m_end := pattern_end.match(message):
-                item = m_end.group(1)
-                # print(f"end {time} {item}")
-
-                if item in item_last_time:
-                    if item not in item_slices:
-                        item_slices[item] = []
-                    item_slices[item].append((item_last_time[item], time, curr_layer))
-                    del item_last_time[item]
+            if kind == "end":
+                if key in key_last_time:
+                    core_slices.setdefault(core, []).append((name, key_last_time[key], time))
+                    del key_last_time[key]
                 else:
-                    print(f"warning: item not started {item}")
+                    print(f"warning: name not started {name}")
 
-                if m_layer := pattern_layer.match(item):
-                    if m_layer.group(1) != str(curr_layer):
-                        print(f"warning: layer end mismatch, expected {curr_layer} got {item}")
-                    curr_layer = None
+    for key in key_last_time:
+        print(f"warning: {key} didn't end")
 
-    for item in item_last_time:
-        print(f"warning: item {item} not ended")
+    for core, slices in core_slices.items():
+        print(f"{core}: {slices}")
 
-    for item, slices in item_slices.items():
-        print(f"{item}: {slices}")
+    if len(core_slices) == 0:
+        return
 
     # plot slices
-    fig, axes = plt.subplots(nrows=len(item_slices), sharex="all", squeeze=False)
+    fig, axes = plt.subplots(nrows=len(core_slices), sharex="all", squeeze=False)
     axes = axes.squeeze(1)
 
-    layer_colors = ["r", "g", "b"]
+    cmap = matplotlib.colormaps["tab10"]
+    name_colors = {name: cmap(i) for i, name in enumerate(names)}
 
-    for i, (item, slices) in enumerate(item_slices.items()):
+    for i, (core, slices) in enumerate(core_slices.items()):
+        used_names = {}
+
         ax = axes[i]
-        # ax.set_ylabel(item, rotation=0, labelpad=50)
-        ax.set_ylabel(item)
-        for (start, end, layer) in slices:
-            color = layer_colors[layer] if layer is not None else "k"
-            ax.axvspan(start, end, facecolor=color, alpha=0.5)
+        # ax.set_ylabel(name, rotation=0, labelpad=50)
+        ax.set_ylabel(core)
+        for (name, start, end) in slices:
+            used_names[name] = ()
+            color = name_colors[name]
+            ax.axvspan(start, end, facecolor=color, alpha=1.0)
+
+        ax.legend(handles=[matplotlib.patches.Patch(color=name_colors[name], label=name) for name in used_names])
 
     # fig.tight_layout()
     plt.show(block=block)
 
 
 def main():
-    path = r"\\wsl.localhost\Ubuntu\home\karel\new-attempt\pulp-sdk\applications\custom\output.txt"
+    # path = r"\\wsl.localhost\Ubuntu\home\karel\new-attempt\pulp-sdk\applications\custom\output.txt"
+    path = "../stream/outputs/stdout.txt"
     with open(path, "r") as f:
         data = f.read()
     plot_profile(data)
