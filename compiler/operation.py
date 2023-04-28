@@ -94,6 +94,14 @@ class OperationCopy(Operation):
             f.writeln(f"pi_cl_ram_read_blocking(ram, {self.src}, {self.dest}, {self.size_bytes});")
             return
         if self.dest.kind.addressable and self.src.kind.addressable:
+            if self.dest.kind == MemoryKind.L1 and self.src.kind == MemoryKind.L2:
+                f.writeln(f"memcpy_cl_l1_l2_blocking({self.dest}, {self.src}, {self.size_bytes});")
+                return
+            if self.dest.kind == MemoryKind.L2 and self.src.kind == MemoryKind.L1:
+                f.writeln(f"memcpy_cl_l2_l1_blocking({self.dest}, {self.src}, {self.size_bytes});")
+                return
+
+            # TODO figure out DMA for within same memory?
             f.writeln(f"memcpy({self.dest}, {self.src}, {self.size_bytes});")
             return
 
