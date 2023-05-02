@@ -94,25 +94,28 @@ def main():
     from stream.visualization.memory_usage import plot_memory_usage
     from stream.visualization.plot_scme import bar_plot_stream_cost_model_evaluations_breakdown
 
-    plot_full_schedule = True
-    draw_dependencies = True
-    plot_data_transfer = True
-    section_start_percent = (0,)
-    percent_shown = (100,)
-    timeline_fig_path = "outputs/schedule_plot.png"
-    memory_fig_path = "outputs/memory_plot.png"
-    energy_fig_path = "outputs/energy_plot.png"
-    plot_timeline_brokenaxes(scme[0].workload, scme[0].accelerator, draw_dependencies, section_start_percent,
-                             percent_shown, plot_data_transfer, fig_path=timeline_fig_path)
-    plot_memory_usage(scme[0].accelerator.memory_manager, fig_path=memory_fig_path)
-    bar_plot_stream_cost_model_evaluations_breakdown([scme], fig_path=energy_fig_path)
+    plot_stream = False
+    plot_profile = False
+
+    if plot_stream:
+        draw_dependencies = True
+        plot_data_transfer = True
+        section_start_percent = (0,)
+        percent_shown = (100,)
+        timeline_fig_path = "outputs/schedule_plot.png"
+        memory_fig_path = "outputs/memory_plot.png"
+        energy_fig_path = "outputs/energy_plot.png"
+        plot_timeline_brokenaxes(scme[0].workload, scme[0].accelerator, draw_dependencies, section_start_percent,
+                                 percent_shown, plot_data_transfer, fig_path=timeline_fig_path)
+        plot_memory_usage(scme[0].accelerator.memory_manager, fig_path=memory_fig_path)
+        bar_plot_stream_cost_model_evaluations_breakdown([scme], fig_path=energy_fig_path)
 
     with open(node_hw_performances_path, "rb") as f:
         node_hw_performances = pickle.load(file=f)
 
     pulp_sdk_path = r"~/new-attempt/pulp-sdk"
     project_path = r"~/new-attempt/pulp-sdk/applications/custom"
-    compile_and_run(workload, scme[0], node_hw_performances, pulp_sdk_path, project_path, run=True)
+    compile_and_run(workload, scme[0], node_hw_performances, pulp_sdk_path, project_path, run=True, plot=plot_profile)
 
 
 if __name__ == "__main__":

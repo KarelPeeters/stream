@@ -4,6 +4,9 @@ from compiler.codegen import array_to_str, DataType
 
 
 def ima_sum(input, weight, adc_low: int, adc_high: int):
+    assert np.all((-128 <= input) & (input < 127))
+    assert np.all((-7 <= weight) & (weight < 7))
+
     # matches operations in GVSOC simulator exactly
     value = np.float32(0.0)
     DAC_PRECISION = 8
@@ -37,6 +40,7 @@ def ima_sum(input, weight, adc_low: int, adc_high: int):
             return int(value) - 1
         return int(value)
 
+
 def random_ima_weight(shape):
     return np.random.randint(-7, 7, shape)
 
@@ -46,14 +50,14 @@ def random_ima_input(shape):
 
 
 def ima_matmul(input, weight):
-    (height, width) = weight.shape
-    (n, height_1) = input.shape
-    assert height == height_1
+    (b, c1) = input.shape
+    (k, c) = weight.shape
+    assert c1 == c, f"Shape mismatch: input={input.shape}, weight={weight.shape}"
 
-    output = np.zeros((n, width), dtype=np.int32)
-    for i in range(n):
-        for j in range(width):
-            output[i, j] = ima_sum(input[i, :], weight[:, j], 16, 16)
+    output = np.zeros((b, k), dtype=np.int32)
+    for bi in range(b):
+        for ki in range(k):
+            output[bi, ki] = ima_sum(input[bi, :], weight[ki, :], 16, 16)
 
     return output
 

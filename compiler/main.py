@@ -73,13 +73,14 @@ class State:
         # define inputs and constants
         for input in onnx_model.graph.input:
             shape = tuple(d.dim_value for d in list(input.type.tensor_type.shape.dim))
-            buffer = self.define_buffer(input.name, shape, DataType.Int8, const=True)
+            buffer = self.define_buffer(input.name, shape, DataType.Int8, const=True, transposed=False)
 
             buffer.input = True
             buffer.sim_value = random_ima_input(shape)
         for const in onnx_model.graph.initializer:
             shape = tuple(const.dims)
-            buffer = self.define_buffer(const.name, shape, DataType.Int4, const=True)
+            transposed = len(shape) == 2
+            buffer = self.define_buffer(const.name, shape, DataType.Int4, const=True, transposed=transposed)
 
             buffer.constant = True
             buffer.sim_value = random_ima_weight(shape)
@@ -91,7 +92,7 @@ class State:
     def get_buffer(self, name):
         return self.buffers[name]
 
-    def define_buffer(self, name, shape: tuple, dtype: DataType, const: bool) -> Buffer:
+    def define_buffer(self, name, shape: tuple, dtype: DataType, const: bool, transposed: bool) -> Buffer:
         if name in self.buffers:
             raise KeyError(f"Buffer {name} already defined")
         upper = name_to_c_upper(name)
@@ -104,7 +105,7 @@ class State:
             pointer_l3 = Pointer(f"(L3_DYN_START + L3_DYN_OFFSET_{upper})", MemoryKind.L3)
 
         buffer = Buffer(
-            shape=shape, dtype=dtype, const=const,
+            shape=shape, dtype=dtype, const=const, transposed=transposed,
             pointer_l1=pointer_l1, pointer_l2=pointer_l2, pointer_l3=pointer_l3
         )
         self.buffers[name] = buffer
@@ -169,7 +170,7 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
         assert start == 0
         output_shape.append(end)
 
-    output = state.define_buffer(output_name, tuple(output_shape), dtype=DataType.Int8, const=False)
+    output = state.define_buffer(output_name, tuple(output_shape), dtype=DataType.Int8, const=False, transposed=False)
     output.ready_lock = state.new_lock()
 
     loop_ranges = cn.loop_ranges
@@ -218,6 +219,7 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
 
         # simulate
         if state.sim:
+            assert weight.transposed
             output.sim_value = ima_matmul(input.sim_value, weight.sim_value)
     else:
         raise ValueError(f"Unrecognised equation {cn.equation}")
@@ -321,7 +323,12 @@ def generate_data(f, state: State, d_bin):
             else:
                 buffer.pointer_l3_expected = pointer
 
-            value_bytes = array_to_bytes(buffer.sim_value.flatten(), buffer.dtype)
+            if buffer.transposed:
+                value_flat = buffer.sim_value.transpose().flatten()
+            else:
+                value_flat = buffer.sim_value.flatten()
+
+            value_bytes = array_to_bytes(value_flat, buffer.dtype)
             assert len(value_bytes) == buffer.size_bytes
             d_bin.write(value_bytes)
 
@@ -362,7 +369,9 @@ def generate_code(state: State, project_path):
             f.writeln()
 
 
-def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, project_path, run: bool):
+# Get non-square matrix multiply working
+
+def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, project_path, run: bool, plot: bool):
     print("compiler")
     print(onnx_path)
     print(scme)
@@ -443,4 +452,5 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
 
         result.check_returncode()
 
-        plot_profile(stdout)
+        if plot:
+            plot_profile(stdout)

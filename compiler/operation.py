@@ -167,6 +167,9 @@ class Buffer:
     dtype: DataType
     const: bool
 
+    # whether the buffer is stored transposed in device memory
+    transposed: bool
+
     # TODO remove this 1-to-1 correspondence between buffers and pointers in various memory levels
     pointer_l1: Optional[Pointer]
     pointer_l2: Optional[Pointer]
@@ -176,6 +179,10 @@ class Buffer:
     sim_value: Optional[np.array] = None
 
     ready_lock: Optional[Lock] = None
+
+    def __post_init__(self):
+        if self.transposed:
+            assert len(self.shape) == 2
 
     @property
     def size_bytes(self):
