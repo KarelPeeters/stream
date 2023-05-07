@@ -457,4 +457,4 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
         result.check_returncode()
 
         if plot:
-            plot_profile(stdout)
+            plot_profile(stdout, block=False)

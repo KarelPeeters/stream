@@ -134,7 +134,8 @@ def main():
     hint_loops = []
 
     # accelerator = 'inputs.testing.hardware.dual_testing_core_offchip'
-    accelerator = ima_with_offchip(2, 1000, 1000)
+    # TODO use weight_size=4 at some point
+    accelerator = ima_with_offchip(2, 1000, 1000, 8)
     # workload = 'inputs.testing.workload.testing_workload_for_2_cores'
     # workload = 'inputs.testing.workload.simple_example_workload'
     # workload = r"C:\Documents\Programming\Python\MLPlayGround\branching_conv.onnx"
@@ -157,8 +158,9 @@ def main():
 
     from stream.visualization.schedule import plot_timeline_brokenaxes
 
+    # TODO clean up plotting bools and blocking
     generate = True
-    run = False
+    run = True
     plot_stream = True
     plot_profile = True
 

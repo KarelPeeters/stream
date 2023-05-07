@@ -9,14 +9,14 @@ pattern_profile = re.compile(r"^== profile == (\d+) == ([^=]+) == ([^=]+) == ([^
 def plot_profile(stdout: str, block: bool = True):
     core_slices = {}
     key_last_time = {}
-    names = set()
+    names = dict()  # deterministic set
 
     for line in stdout.splitlines():
         if m := pattern_profile.match(line):
             time, core, kind, name = m.groups()
             time = int(time)
             key = (core, name)
-            names.add(name)
+            names[name] = None
 
             if kind == "start":
                 if key in key_last_time:
@@ -60,6 +60,7 @@ def plot_profile(stdout: str, block: bool = True):
         ax.legend(handles=[matplotlib.patches.Patch(color=name_colors[name], label=name) for name in used_names])
 
     # fig.tight_layout()
+    plt.savefig("outputs/profile.png")
     plt.show(block=block)
 
 

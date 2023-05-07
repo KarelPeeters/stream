@@ -12,7 +12,7 @@ from stream.classes.hardware.architecture.communication_link import Communicatio
 
 def basic_memory_instance(
         name: str, size: int,
-        w_bw: int, r_bw: int,
+        r_bw: int, w_bw: int,
         r_port: int, w_port: int, rw_port: int,
 ) -> MemoryInstance:
     return MemoryInstance(
@@ -32,16 +32,15 @@ def basic_memory_instance(
 
 # TODO ensure that everything refers to the digital clock
 
-def get_memory_hierarchy(multiplier_array):
+def get_memory_hierarchy(multiplier_array, width: int, height: int, weight_size: int):
     # accelerator registers
     reg_input = MemoryInstance(
         name="reg_input", size=8, r_bw=8, w_bw=8, r_cost=0, w_cost=0, area=0,
         r_port=1, w_port=1, rw_port=0, latency=1
     )
 
-    # TODO change this to 4 bytes at some point
     reg_weight = MemoryInstance(
-        name="reg_weight", size=8, r_bw=8, w_bw=8, r_cost=0, w_cost=0, area=0,
+        name="reg_weight", size=weight_size, r_bw=weight_size, w_bw=weight_size, r_cost=0, w_cost=0, area=0,
         r_port=1, w_port=1, rw_port=0, latency=1
     )
 
@@ -50,13 +49,22 @@ def get_memory_hierarchy(multiplier_array):
         r_port=2, w_port=2, rw_port=0, latency=1
     )
 
-    # actual memories
+    # trick to make weight loading extremely slow
+    #   * bandwidth: 4 weights per cycle, like the real accelerator
+    #   * size just large enough to fit lower level
+    factor = 4
 
+    weight_bottleneck = basic_memory_instance(
+        "weight_bottleneck", size=width * height * weight_size,
+        w_bw=factor * weight_size, r_bw=factor * weight_size, w_port=1, r_port=1, rw_port=0,
+    )
+
+    # actual memories
     l1 = basic_memory_instance(
-        name="L1", size=0x00010000, w_bw=8 * 8, r_bw=8 * 8, r_port=2, w_port=2, rw_port=0,
+        name="L1", size=0x00010000, r_bw=8 * 8, w_bw=8 * 8, r_port=2, w_port=2, rw_port=0,
     )
     l2 = basic_memory_instance(
-        name="L2", size=0x00080000, w_bw=8 * 8, r_bw=8 * 8, r_port=2, w_port=2, rw_port=0,
+        name="L2", size=0x00080000, r_bw=8 * 8, w_bw=8 * 8, r_port=2, w_port=2, rw_port=0,
     )
 
     memory_hierarchy_graph = MemoryHierarchy(operational_array=multiplier_array)
@@ -80,10 +88,16 @@ def get_memory_hierarchy(multiplier_array):
         served_dimensions={(0, 1)}
     )
 
-    ##################################### on-chip highest memory hierarchy initialization #####################################
+    memory_hierarchy_graph.add_memory(
+        memory_instance=weight_bottleneck,
+        operands=('I2',),
+        port_alloc=({'fh': 'w_port_1', 'tl': 'r_port_1', 'fl': None, 'th': None},),
+        served_dimensions='all',
+    )
 
     memory_hierarchy_graph.add_memory(
-        memory_instance=l1, operands=('I1', 'I2', 'O'),
+        memory_instance=l1,
+        operands=('I1', 'I2', 'O'),
         port_alloc=(
             {'fh': 'w_port_1', 'tl': 'r_port_1', 'fl': None, 'th': None},
             {'fh': 'w_port_1', 'tl': 'r_port_1', 'fl': None, 'th': None},
@@ -93,7 +107,8 @@ def get_memory_hierarchy(multiplier_array):
     )
 
     memory_hierarchy_graph.add_memory(
-        memory_instance=l2, operands=('I1', 'I2', 'O'),
+        memory_instance=l2,
+        operands=('I1', 'I2', 'O'),
         port_alloc=(
             {'fh': 'w_port_1', 'tl': 'r_port_1', 'fl': None, 'th': None},
             {'fh': 'w_port_1', 'tl': 'r_port_1', 'fl': None, 'th': None},
@@ -101,6 +116,8 @@ def get_memory_hierarchy(multiplier_array):
         ),
         served_dimensions='all'
     )
+
+    # visualize_memory_hierarchy_graph(memory_hierarchy_graph)
 
     return memory_hierarchy_graph
 
@@ -120,15 +137,16 @@ def get_operational_array(width: int, height: int):
 
 
 def get_dataflows(width: int, height: int):
+    # TODO figure out the syntax for combined unrolling here
     return None
     # return [{'D1': ('K', 32), 'D2': ('C', 32)}]
     # return [{'D1': ('K', 16), 'D2': ('C', 16), 'D3': ('OX', 4), 'D4': ('FX', 3)}]
     # return []
 
 
-def get_ima_core(id, width: int, height: int):
+def get_ima_core(id, width: int, height: int, weight_size: int):
     operational_array = get_operational_array(width, height)
-    memory_hierarchy = get_memory_hierarchy(operational_array)
+    memory_hierarchy = get_memory_hierarchy(operational_array, width, height, weight_size)
     dataflows = get_dataflows(width, height)
     core = Core(id, operational_array, memory_hierarchy, dataflows)
     return core
@@ -199,8 +217,8 @@ def get_cores_graph(cores, offchip_core, unit_energy_cost: float):
     return H
 
 
-def ima_with_offchip(core_count: int, width: int, height: int):
-    cores = [get_ima_core(i, width, height) for i in range(core_count)]
+def ima_with_offchip(core_count: int, width: int, height: int, weight_size: int):
+    cores = [get_ima_core(i, width, height, weight_size) for i in range(core_count)]
 
     offchip_core_id = core_count
 
@@ -214,4 +232,4 @@ def ima_with_offchip(core_count: int, width: int, height: int):
 
 
 if __name__ == "__main__":
-    print(ima_with_offchip(2, 1024, 1024))
+    print(ima_with_offchip(2, 1024, 1024, 8))
