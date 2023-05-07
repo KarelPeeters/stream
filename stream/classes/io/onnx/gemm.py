@@ -14,7 +14,7 @@ class GemmParser(Parser):
     """Parses an ONNX Gemm operator into a LayerNode"""
 
     def __init__(
-        self, node_id, node, nodes_outputs, mapping, onnx_model, accelerator
+            self, node_id, node, nodes_outputs, mapping, onnx_model, accelerator
     ) -> None:
         super().__init__(node_id, node, nodes_outputs, mapping, onnx_model, accelerator)
 
@@ -40,7 +40,8 @@ class GemmParser(Parser):
             B = B  # Not to be confused with operand 'B' which is the weights
             d["loop_dim_size"] = {"K": K, "C": C, "B": B}
             d["dimension_relations"] = []
-            d["operand_precision"] = {"O": 16, "O_final": 8, "B": 8, "A": 8}
+            # TODO make this configurable
+            d["operand_precision"] = {'O': 8, 'O_final': 8, 'B': 8, 'A': 8}
 
             core_allocation = node_mapping["core_allocation"]
             d["core_allocation"] = core_allocation
@@ -55,7 +56,7 @@ class GemmParser(Parser):
             # Find the previous layer(s) that should be this node's parent(s)
             node_inputs = self.node.input
             assert (
-                len(node_inputs) >= 2
+                    len(node_inputs) >= 2
             ), f"Gemm should have atleast two input names, but has: {node_inputs}."
             (first_input_name, second_input_name) = node_inputs[:2]
             d["operand_source"] = {
@@ -88,10 +89,10 @@ class GemmParser(Parser):
             ia_dimension_shape = (ia_dimension_shape[1], ia_dimension_shape[0])
 
         assert (
-            len(ia_dimension_shape) == len(oa_dimension_shape) == 2
+                len(ia_dimension_shape) == len(oa_dimension_shape) == 2
         )  # First element is batch size, second is input/output channel
         assert (
-            ia_dimension_shape[0] == oa_dimension_shape[0]
+                ia_dimension_shape[0] == oa_dimension_shape[0]
         )  # Batch size should be the same for input and output
         # If the batch size is 0, we discard it by setting it to 1 internally inside ZigZag
         batch_size = ia_dimension_shape[0]
