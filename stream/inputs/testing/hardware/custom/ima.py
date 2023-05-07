@@ -120,7 +120,8 @@ def get_operational_array(width: int, height: int):
 
 
 def get_dataflows(width: int, height: int):
-    return [{'D1': ('K', 32), 'D2': ('C', 32)}]
+    return None
+    # return [{'D1': ('K', 32), 'D2': ('C', 32)}]
     # return [{'D1': ('K', 16), 'D2': ('C', 16), 'D3': ('OX', 4), 'D4': ('FX', 3)}]
     # return []
 
@@ -207,9 +208,10 @@ def ima_with_offchip(core_count: int, width: int, height: int):
     cores_graph = get_cores_graph(cores, offchip_core, 0)
 
     global_buffer = None
-    accelerator = Accelerator("Testing-2-core-with-offchip", cores_graph, global_buffer, offchip_core_id=offchip_core_id)
+    accelerator = Accelerator("Testing-2-core-with-offchip", cores_graph, global_buffer,
+                              offchip_core_id=offchip_core_id)
     return accelerator
 
 
 if __name__ == "__main__":
-    print(ima_with_offchip(2, 1000, 1000))
+    print(ima_with_offchip(2, 1024, 1024))

@@ -1,3 +1,4 @@
+import os
 import pickle
 import re
 from typing import Generator
@@ -133,7 +134,7 @@ def main():
     hint_loops = []
 
     # accelerator = 'inputs.testing.hardware.dual_testing_core_offchip'
-    accelerator = ima_with_offchip(2, 1000, 1000, 8)
+    accelerator = ima_with_offchip(2, 1000, 1000)
     # workload = 'inputs.testing.workload.testing_workload_for_2_cores'
     # workload = 'inputs.testing.workload.simple_example_workload'
     # workload = r"C:\Documents\Programming\Python\MLPlayGround\branching_conv.onnx"
@@ -147,6 +148,9 @@ def main():
     node_hw_cost_pkl_name = f'saved_CN_HW_cost-{experiment_id}'
 
     node_hw_performances_path = f"outputs/{node_hw_cost_pkl_name}.pickle"
+
+    if os.path.exists(node_hw_performances_path):
+        os.remove(node_hw_performances_path)
 
     scme, _ = get_hardware_performance_stream(accelerator, workload, mapping, CN_define_mode, hint_loops,
                                               node_hw_performances_path)
