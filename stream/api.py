@@ -2,11 +2,15 @@ import pickle
 import re
 from typing import Generator
 
+from matplotlib import pyplot as plt
 from zigzag.classes.stages import *
 
 from compiler.main import compile_and_run
 from stream.api_edited import save_graph
+from stream.classes.cost_model.cost_model import StreamCostModelEvaluation
+from stream.classes.hardware.architecture.communication_link import CommunicationLink
 from stream.classes.stages import *
+from stream.inputs.testing.hardware.custom.ima import ima_with_offchip
 
 
 class DebugStage(Stage):
@@ -29,7 +33,7 @@ def get_hardware_performance_stream(hardware, workload, mapping, CN_define_mode,
                          format=_logging_format)
 
     mainstage = MainStage([  # Initializes the MainStage as entry point
-        AcceleratorParserStage,  # Parses the accelerator
+        # AcceleratorParserStage,  # Parses the accelerator
         StreamONNXModelParserStage,  # Parses the ONNX Model into the workload
         # UserDefinedModelParserStage,  # Parses the user-defined Model into the workload
         GenerateCNWorkloadHybridStage,
@@ -60,6 +64,62 @@ def get_hardware_performance_stream(hardware, workload, mapping, CN_define_mode,
     return answers
 
 
+def sort_dict(d: dict, f: callable = lambda x: x):
+    return dict(sorted(d.items(), key=lambda item: f(item[0])))
+
+
+def time_str(start, end):
+    return f"{start:6} .. {end:6} = {end - start:6}"
+
+
+def print_workload_per_core(scme: StreamCostModelEvaluation):
+    print("Workload:")
+
+    # get_name_for_schedule_plot
+
+    # collect info
+    nodes_per_core = {}
+    for node in scme.workload.nodes:
+        nodes_per_core.setdefault(node.core_allocation, []).append(node)
+
+    # actually print things
+    for core, nodes in sort_dict(nodes_per_core).items():
+        nodes = sorted(nodes, key=lambda n: n.start)
+
+        print(f"  core {core}:")
+        for node in nodes:
+            print(f"    {time_str(node.start, node.end)} {node}")
+
+    seen_links = set()
+    for (key, links) in sort_dict(scme.accelerator.pair_links, f=lambda c: (c[0].id, c[1].id)).items():
+        for link in links:
+            link: CommunicationLink
+            if link in seen_links:
+                continue
+            seen_links.add(link)
+
+            # name = link.get_name_for_schedule_plot()
+            # print(f"  link {name} {key} {link}:")
+
+            if link.bidirectional:
+                arrow = "<->"
+            else:
+                arrow = "-->"
+
+            periods = [
+                *(("active", s, e, o, g) for (s, e, o, g) in link.active_periods),
+                *(("blocked", s, e, None, g) for (s, e, g) in link.blocked_periods),
+            ]
+            periods = sorted(periods, key=lambda p: p[1])
+
+            if len(periods) == 0:
+                continue
+
+            print(f"  link {key[0].id}{arrow}{key[1].id} bw={link.bandwidth}")
+            for (kind, start, end, operand, origin) in periods:
+                print(f"    {time_str(start, end)} {kind} {operand} {origin}")
+
+
 def main():
     # accelerator = 'inputs.examples.hardware.TPU_like_quad_core'
     # workload = 'inputs.examples.workload.resnet18_few_layers'
@@ -72,7 +132,8 @@ def main():
     # hint_loops = [('OY', 4)]
     hint_loops = []
 
-    accelerator = 'inputs.testing.hardware.dual_testing_core_offchip'
+    # accelerator = 'inputs.testing.hardware.dual_testing_core_offchip'
+    accelerator = ima_with_offchip(2, 1000, 1000, 8)
     # workload = 'inputs.testing.workload.testing_workload_for_2_cores'
     # workload = 'inputs.testing.workload.simple_example_workload'
     # workload = r"C:\Documents\Programming\Python\MLPlayGround\branching_conv.onnx"
@@ -80,7 +141,7 @@ def main():
     workload = "inputs/onnx/linear.onnx"
     mapping = 'inputs.testing.mapping.testing_mapping'
 
-    hw_name = accelerator.split(".")[-1]
+    hw_name = accelerator.name.split(".")[-1]
     wl_name = re.split(r"/|\.", workload)[-1]
     experiment_id = f"{hw_name}-{wl_name}-CNmode_{CN_define_mode}-hintloop_{str(hint_loops)}"
     node_hw_cost_pkl_name = f'saved_CN_HW_cost-{experiment_id}'
@@ -91,11 +152,13 @@ def main():
                                               node_hw_performances_path)
 
     from stream.visualization.schedule import plot_timeline_brokenaxes
-    from stream.visualization.memory_usage import plot_memory_usage
-    from stream.visualization.plot_scme import bar_plot_stream_cost_model_evaluations_breakdown
 
-    plot_stream = False
-    plot_profile = False
+    generate = True
+    run = False
+    plot_stream = True
+    plot_profile = True
+
+    print_workload_per_core(scme[0])
 
     if plot_stream:
         draw_dependencies = True
@@ -107,15 +170,20 @@ def main():
         energy_fig_path = "outputs/energy_plot.png"
         plot_timeline_brokenaxes(scme[0].workload, scme[0].accelerator, draw_dependencies, section_start_percent,
                                  percent_shown, plot_data_transfer, fig_path=timeline_fig_path)
-        plot_memory_usage(scme[0].accelerator.memory_manager, fig_path=memory_fig_path)
-        bar_plot_stream_cost_model_evaluations_breakdown([scme], fig_path=energy_fig_path)
+        # plot_memory_usage(scme[0].accelerator.memory_manager, fig_path=memory_fig_path)
+        # bar_plot_stream_cost_model_evaluations_breakdown([scme], fig_path=energy_fig_path)
 
-    with open(node_hw_performances_path, "rb") as f:
-        node_hw_performances = pickle.load(file=f)
+        if not generate:
+            plt.show()
 
-    pulp_sdk_path = r"~/new-attempt/pulp-sdk"
-    project_path = r"~/new-attempt/pulp-sdk/applications/custom"
-    compile_and_run(workload, scme[0], node_hw_performances, pulp_sdk_path, project_path, run=True, plot=plot_profile)
+    if generate:
+        with open(node_hw_performances_path, "rb") as f:
+            node_hw_performances = pickle.load(file=f)
+
+        pulp_sdk_path = r"~/new-attempt/pulp-sdk"
+        project_path = r"~/new-attempt/pulp-sdk/applications/custom"
+        compile_and_run(workload, scme[0], node_hw_performances, pulp_sdk_path, project_path, run=run,
+                        plot=plot_profile)
 
 
 if __name__ == "__main__":

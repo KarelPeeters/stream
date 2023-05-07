@@ -177,6 +177,10 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
     temporal = zcme.temporal_mapping
     spatial = zcme.spatial_mapping
 
+    print(f"  loop_ranges: {loop_ranges}")
+    print(f"  temporal: {temporal}")
+    print(f"  spatial: {spatial}")
+
     dim_size = cn.loop_dim_size
 
     core = cn.get_core_allocation()
