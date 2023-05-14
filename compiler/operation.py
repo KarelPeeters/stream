@@ -121,6 +121,7 @@ class OperationMatmul(Operation):
     profile: Profile
 
     def generate_code(self, f, state):
+        assert self.b != 1, "Matmul does not work for b=1"
         f.writeln(
             f"run_matmul("
             f"{self.b}, {self.k}, {self.c}, "

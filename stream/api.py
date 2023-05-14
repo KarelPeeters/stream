@@ -3,7 +3,11 @@ import pickle
 import re
 from typing import Generator
 
+import onnx
+import torch
 from matplotlib import pyplot as plt
+from onnx import shape_inference
+from torch import nn
 from zigzag.classes.stages import *
 
 from compiler.main import compile_and_run
@@ -121,6 +125,26 @@ def print_workload_per_core(scme: StreamCostModelEvaluation):
                 print(f"    {time_str(start, end)} {kind} {operand} {origin}")
 
 
+def export_onnx(path):
+    print("Exporting ONNX model")
+    n = 2
+    c = 16
+    s = 32
+
+    network = nn.Sequential(
+        nn.Linear(c, c),
+        nn.Linear(c, 2 * c),
+    )
+
+    input = torch.randn(n, c)
+    _ = network(input)
+    torch.onnx.export(network, input, path)
+
+    model = onnx.load_model(path)
+    model_shaped = shape_inference.infer_shapes(model)
+    onnx.save_model(model_shaped, path)
+
+
 def main():
     # accelerator = 'inputs.examples.hardware.TPU_like_quad_core'
     # workload = 'inputs.examples.workload.resnet18_few_layers'
@@ -143,6 +167,8 @@ def main():
     workload = "inputs/onnx/linear.onnx"
     mapping = 'inputs.testing.mapping.testing_mapping'
 
+    export_onnx(workload)
+
     hw_name = accelerator.name.split(".")[-1]
     wl_name = re.split(r"/|\.", workload)[-1]
     experiment_id = f"{hw_name}-{wl_name}-CNmode_{CN_define_mode}-hintloop_{str(hint_loops)}"
@@ -153,6 +179,7 @@ def main():
     if os.path.exists(node_hw_performances_path):
         os.remove(node_hw_performances_path)
 
+    print("Running stream")
     scme, _ = get_hardware_performance_stream(accelerator, workload, mapping, CN_define_mode, hint_loops,
                                               node_hw_performances_path)
 

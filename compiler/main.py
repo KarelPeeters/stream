@@ -376,10 +376,7 @@ def generate_code(state: State, project_path):
 # Get non-square matrix multiply working
 
 def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, project_path, run: bool, plot: bool):
-    print("compiler")
-    print(onnx_path)
-    print(scme)
-    print(node_hw_performances)
+    print("Collecting workload")
 
     assert onnx_path.endswith(".onnx")
     onnx_model = onnx.load(onnx_path, load_external_data=False)
@@ -445,7 +442,7 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
 
             f"cd {project_path}",
             # TODO add clean if number of cores changed
-            "make all run"
+            f"./safe_make all run CORES={8} CLUSTERS={1}",
         ]
         result = subprocess.run(["wsl", *"; ".join(commands).split(" ")], stdout=subprocess.PIPE)
         stdout = result.stdout.decode("utf-8")

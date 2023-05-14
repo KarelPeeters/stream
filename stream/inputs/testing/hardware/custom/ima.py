@@ -52,8 +52,7 @@ def get_memory_hierarchy(multiplier_array, width: int, height: int, weight_size:
     # trick to make weight loading extremely slow
     #   * bandwidth: 4 weights per cycle, like the real accelerator
     #   * size just large enough to fit lower level
-    factor = 4
-
+    factor = 1 / 8
     weight_bottleneck = basic_memory_instance(
         "weight_bottleneck", size=width * height * weight_size,
         w_bw=factor * weight_size, r_bw=factor * weight_size, w_port=1, r_port=1, rw_port=0,
@@ -170,7 +169,7 @@ def get_offchip_core(id):
     # actual size 0x00800000, but just use "infinity" here for now
     l3 = basic_memory_instance(
         name="l3", size=10000000000,
-        r_bw=8, w_bw=8, r_port=0, w_port=0, rw_port=1,
+        r_bw=8/4, w_bw=8/4, r_port=0, w_port=0, rw_port=1,
     )
 
     memory_hierarchy_graph = MemoryHierarchy(operational_array=multiplier_array)
@@ -192,6 +191,7 @@ def get_offchip_core(id):
 def get_cores_graph(cores, offchip_core, unit_energy_cost: float):
     edges = []
 
+    # TODO also limit to in-core bandwidth
     offchip_read_bandwidth = offchip_core.mem_r_bw_dict['O'][0]
     offchip_write_bandwidth = offchip_core.mem_w_bw_dict['O'][0]
 
