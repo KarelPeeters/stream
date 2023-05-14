@@ -349,6 +349,17 @@ def generate_data(f, state: State, d_bin):
     f.writeln(f"#define L3_DYN_SIZE {len(alloc_dyn)}")
 
 
+def generate_core_dispatch(f, cores: int):
+    f.writeln("void generated_core(int cluster_id, int core_id) {")
+    with f:
+        f.writeln("if (core_id != 0) return;")
+        f.writeln()
+
+        for core_id in range(cores):
+            f.writeln(f"if (cluster_id == {core_id}) return generated_core_{core_id}();")
+    f.writeln("}")
+
+
 def generate_code(state: State, project_path):
     path_source = os.path.join(project_path, "generated.c")
     path_data_bin = os.path.join(project_path, "generated_data.bin")
@@ -372,8 +383,8 @@ def generate_code(state: State, project_path):
             generate_func_core(f, state, core)
             f.writeln()
 
+        generate_core_dispatch(f, len(state.operations_per_core))
 
-# Get non-square matrix multiply working
 
 def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, project_path, run: bool, plot: bool):
     print("Collecting workload")
@@ -442,7 +453,7 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
 
             f"cd {project_path}",
             # TODO add clean if number of cores changed
-            f"./safe_make all run CORES={8} CLUSTERS={1}",
+            f"./safe_make all run CORES={8} CLUSTERS={len(accelerator.cores)}",
         ]
         result = subprocess.run(["wsl", *"; ".join(commands).split(" ")], stdout=subprocess.PIPE)
         stdout = result.stdout.decode("utf-8")
