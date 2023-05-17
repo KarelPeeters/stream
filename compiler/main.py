@@ -63,6 +63,7 @@ class State:
         self.sim = sim
 
         self.buffers: Dict[str, Buffer] = {}
+        self.core_count = core_count
         self.operations_per_core: List[List[Operation]] = [[] for _ in range(core_count)]
 
         self.next_lock = 0
@@ -97,7 +98,10 @@ class State:
             raise KeyError(f"Buffer {name} already defined")
         upper = name_to_c_upper(name)
 
-        pointer_l1 = Pointer(f"L1_BUFFER_{upper}", MemoryKind.L1)
+        pointers_l1 = [
+            Pointer(f"(L1_START_C{i} + L1_OFFSET_{upper})", MemoryKind.L1)
+            for i in range(self.core_count)
+        ]
         pointer_l2 = Pointer(f"L2_BUFFER_{upper}", MemoryKind.L2)
         if const:
             pointer_l3 = Pointer(f"(L3_CONST_START + L3_CONST_OFFSET_{upper})", MemoryKind.L3)
@@ -106,7 +110,7 @@ class State:
 
         buffer = Buffer(
             shape=shape, dtype=dtype, const=const, transposed=transposed,
-            pointer_l1=pointer_l1, pointer_l2=pointer_l2, pointer_l3=pointer_l3
+            pointers_l1=pointers_l1, pointer_l2=pointer_l2, pointer_l3=pointer_l3
         )
         self.buffers[name] = buffer
         return buffer
@@ -151,6 +155,7 @@ def generate_includes(f):
     f.writeln('#include <bsp/bsp.h>')
     f.writeln('#include "run_layer.h"')
     f.writeln('#include "util.h"')
+    f.writeln('#include "generated.h"')
 
 
 def name_to_c_upper(name: str):
@@ -199,23 +204,23 @@ def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
         # copy inputs
         state.push_cycles(core, "start", "input")
         state.push_operation(core, OperationCopy(input.pointer_l2, input.pointer_l3, input.size_bytes))
-        state.push_operation(core, OperationCopy(input.pointer_l1, input.pointer_l2, input.size_bytes))
+        state.push_operation(core, OperationCopy(input.pointers_l1[core], input.pointer_l2, input.size_bytes))
         state.push_operation(core, OperationCopy(weight.pointer_l2, weight.pointer_l3, weight.size_bytes))
-        state.push_operation(core, OperationCopy(weight.pointer_l1, weight.pointer_l2, weight.size_bytes))
+        state.push_operation(core, OperationCopy(weight.pointers_l1[core], weight.pointer_l2, weight.size_bytes))
         state.push_cycles(core, "end", "input")
 
         # real operation
         state.push_cycles(core, "start", "calc")
         state.push_operation(core, OperationMatmul(
             b=dim_size["B"], k=dim_size["K"], c=dim_size["C"],
-            weight=weight.pointer_l1, input=input.pointer_l1, output=output.pointer_l1,
+            weight=weight.pointers_l1[core], input=input.pointers_l1[core], output=output.pointers_l1[core],
             profile=state.new_profile(ProfileInfo(core=f"core_{core}_mm", name="matmul")),
         ))
         state.push_cycles(core, "end", "calc")
 
         # copy output
         state.push_cycles(core, "start", "output")
-        state.push_operation(core, OperationCopy(output.pointer_l2, output.pointer_l1, output.size_bytes))
+        state.push_operation(core, OperationCopy(output.pointer_l2, output.pointers_l1[core], output.size_bytes))
         state.push_operation(core, OperationCopy(output.pointer_l3, output.pointer_l2, output.size_bytes))
         state.push_operation(core, OperationLockIncrement(output.ready_lock))
         state.push_cycles(core, "end", "output")
@@ -268,11 +273,31 @@ def generate_func_init(f, state: State):
     f.writeln("}")
     f.writeln()
 
-    f.writeln("void generated_init_cluster() {}")
+    f.writeln("i32 generated_init_cluster(int cluster_id, struct pi_device *cluster_device) {")
+    with f:
+        for i in range(state.core_count):
+            f.writeln(f"if (cluster_id == {i}) {{")
+            with f:
+                f.writeln(f"L1_START_C{i} = pi_l1_malloc(cluster_device, L1_SIZE);")
+                f.writeln(f"if (L1_START_C{i} == NULL) {{")
+                with f:
+                    f.writeln("return -1;")
+                f.writeln("}")
+            f.writeln("}")
+
+        f.writeln("return 0;")
+    f.writeln("}")
 
 
 def generate_func_final(f, state: State):
-    f.writeln("void generated_final_cluster() {}")
+    f.writeln("void generated_final_cluster(int cluster_id, struct pi_device *cluster_device) {")
+    with f:
+        for i in range(state.core_count):
+            f.writeln(f"if (cluster_id == {i}) {{")
+            with f:
+                f.writeln(f"pi_l1_free(cluster_device, L1_START_C{i}, L1_SIZE);")
+            f.writeln("}")
+    f.writeln("}")
     f.writeln()
 
     f.writeln("void generated_final_fabric() {")
@@ -307,17 +332,18 @@ def generate_func_core(f, state: State, core):
 
 
 def generate_data(f, state: State, d_bin):
-    alloc_const = Allocator()
-    alloc_dyn = Allocator()
+    alloc_l1 = Allocator()
+    alloc_l3_const = Allocator()
+    alloc_l3_dyn = Allocator()
 
     for name, buffer in state.buffers.items():
         upper = name_to_c_upper(name)
 
-        f.writeln(f"PI_L1 i8 {buffer.pointer_l1}[{buffer.size_bytes}];")
+        f.writeln(f"#define L1_OFFSET_{upper} {alloc_l1.alloc(buffer.size_bytes)}")
         f.writeln(f"PI_L2 i8 {buffer.pointer_l2}[{buffer.size_bytes}];")
 
         if buffer.sim_value is not None:
-            offset = alloc_const.alloc(buffer.size_bytes)
+            offset = alloc_l3_const.alloc(buffer.size_bytes)
             offset_name = f"L3_CONST_OFFSET_{upper}"
             f.writeln(f"#define {offset_name} {offset}")
 
@@ -337,16 +363,20 @@ def generate_data(f, state: State, d_bin):
             d_bin.write(value_bytes)
 
         if not buffer.const:
-            offset = alloc_dyn.alloc(buffer.size_bytes)
+            offset = alloc_l3_dyn.alloc(buffer.size_bytes)
             offset_name = f"L3_DYN_OFFSET_{upper}"
             # TODO split into offset and start again
             f.writeln(f"#define {offset_name} {offset}")
 
     f.writeln()
+    for i in range(state.core_count):
+        f.writeln(f"static PI_L1 u8 *L1_START_C{i} = NULL;")
+    f.writeln(f"#define L1_SIZE {len(alloc_l1)}")
+    f.writeln()
     f.writeln("static u32 L3_CONST_START = 0;")
     f.writeln("static u32 L3_DYN_START = 0;")
-    f.writeln(f"#define L3_CONST_SIZE {len(alloc_const)}")
-    f.writeln(f"#define L3_DYN_SIZE {len(alloc_dyn)}")
+    f.writeln(f"#define L3_CONST_SIZE {len(alloc_l3_const)}")
+    f.writeln(f"#define L3_DYN_SIZE {len(alloc_l3_dyn)}")
 
 
 def generate_core_dispatch(f, cores: int):
@@ -396,9 +426,10 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
 
     workload: DiGraph = scme.workload
     accelerator: Accelerator = scme.accelerator
+    cluster_cores = len(accelerator.cores) - 1
 
     np.random.seed(0)
-    state = State(onnx_model, len(accelerator.cores), sim=True)
+    state = State(onnx_model, cluster_cores, sim=True)
 
     for cn in workload:
         cn: ComputationNode
@@ -453,7 +484,7 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
 
             f"cd {project_path}",
             # TODO add clean if number of cores changed
-            f"./safe_make all run CORES={8} CLUSTERS={len(accelerator.cores)}",
+            f"./safe_make all run CORES={8} CLUSTERS={cluster_cores}",
         ]
         result = subprocess.run(["wsl", *"; ".join(commands).split(" ")], stdout=subprocess.PIPE)
         stdout = result.stdout.decode("utf-8")

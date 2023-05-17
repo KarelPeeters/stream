@@ -2,7 +2,7 @@ import enum
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 
 import numpy as np
 
@@ -172,7 +172,7 @@ class Buffer:
     transposed: bool
 
     # TODO remove this 1-to-1 correspondence between buffers and pointers in various memory levels
-    pointer_l1: Optional[Pointer]
+    pointers_l1: Optional[List[Pointer]]
     pointer_l2: Optional[Pointer]
     pointer_l3: Optional[Pointer]
 
