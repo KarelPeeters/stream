@@ -127,7 +127,7 @@ def print_workload_per_core(scme: StreamCostModelEvaluation):
 
 def export_onnx(path):
     print("Exporting ONNX model")
-    n = 2
+    n = 256
     c = 16
     s = 32
 
@@ -155,7 +155,8 @@ def main():
     # hint_loops = [('OY', 'all'), ('OX', 'all')]
     # hint_loops = [('OY', 'all')]
     # hint_loops = [('OY', 4)]
-    hint_loops = []
+    hint_loops = [('B', 2)]
+    # hint_loops = []
 
     # accelerator = 'inputs.testing.hardware.dual_testing_core_offchip'
     # TODO use weight_size=4 at some point

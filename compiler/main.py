@@ -12,7 +12,8 @@ from zigzag.classes.mapping.combined_mapping import Mapping
 from compiler.codegen import DataType, array_to_bytes
 from compiler.ima_simulate import random_ima_input, random_ima_weight, ima_matmul
 from compiler.operation import Operation, MemoryKind, Pointer, Lock, Profile, Cycles, OperationCopy, OperationMatmul, \
-    Buffer, OperationPad, CyclesInfo, ProfileInfo, OperationRecordCycles, OperationLockIncrement, OperationLockWait
+    Buffer, OperationPad, CyclesInfo, ProfileInfo, OperationRecordCycles, OperationLockIncrement, OperationLockWait, \
+    OperationCopy2D, Tensor, OperationComment
 from compiler.plot_profile import plot_profile
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.workload.computation_node import ComputationNode
@@ -49,6 +50,9 @@ class Allocator:
         self.next_offset = 0
 
     def alloc(self, size):
+        assert int(size) == size
+        size = int(size)
+
         offset = self.next_offset
         self.next_offset += size
         return offset
@@ -65,6 +69,9 @@ class State:
         self.buffers: Dict[str, Buffer] = {}
         self.core_count = core_count
         self.operations_per_core: List[List[Operation]] = [[] for _ in range(core_count)]
+
+        self.tmp_size_per_core: List[int] = [0 for _ in range(core_count)]
+        self.cn_locks = dict()
 
         self.next_lock = 0
         self.profile_infos: List[ProfileInfo] = []
@@ -93,16 +100,24 @@ class State:
     def get_buffer(self, name):
         return self.buffers[name]
 
-    def define_buffer(self, name, shape: tuple, dtype: DataType, const: bool, transposed: bool) -> Buffer:
+    # TODO switch to values instead of buffers
+    # def define_value(self, name: str, dtype: DataType, shape: tuple[int], transposed: bool, allow_existing: bool, expected_data: np.array):
+    #     pass
+
+    def define_buffer(
+            self,
+            name, shape: tuple, dtype: DataType,
+            const: bool, transposed: bool,
+            allow_existing: bool = False
+    ) -> Buffer:
         if name in self.buffers:
+            if allow_existing:
+                # TODO assert that properties match?
+                return self.buffers[name]
+
             raise KeyError(f"Buffer {name} already defined")
         upper = name_to_c_upper(name)
 
-        pointers_l1 = [
-            Pointer(f"(L1_START_C{i} + L1_OFFSET_{upper})", MemoryKind.L1)
-            for i in range(self.core_count)
-        ]
-        pointer_l2 = Pointer(f"L2_BUFFER_{upper}", MemoryKind.L2)
         if const:
             pointer_l3 = Pointer(f"(L3_CONST_START + L3_CONST_OFFSET_{upper})", MemoryKind.L3)
         else:
@@ -110,7 +125,7 @@ class State:
 
         buffer = Buffer(
             shape=shape, dtype=dtype, const=const, transposed=transposed,
-            pointers_l1=pointers_l1, pointer_l2=pointer_l2, pointer_l3=pointer_l3
+            pointer_l3=pointer_l3
         )
         self.buffers[name] = buffer
         return buffer
@@ -123,12 +138,35 @@ class State:
         cycles = self.new_cycles(info)
         self.push_operation(core, OperationRecordCycles(cycles))
 
+    def push_copy(self, core: int, dest, src, size_bytes):
+        op = OperationCopy(dest=dest, src=src, size_bytes=size_bytes)
+        self.push_operation(core, op)
+
+    def push_copy_tensor(self, core: int, upper: Pointer, lower: Pointer, tensor: Tensor, down: bool):
+        # TODO generalize to other ranks
+        assert tensor.rank == 2, f"Can only copy 2D tensors for now, got {tensor}"
+
+        op = OperationCopy2D(
+            upper.offset(tensor.offset_bytes),
+            lower,
+            down,
+            tensor.size_bytes,
+            tensor.stride_bytes(0),
+            tensor.shape_bytes(1),
+        )
+        self.push_operation(core, op)
+
     # TODO reduce code duplication here
     def new_lock(self) -> Lock:
         assert not self.meta_frozen
         index = self.next_lock
         self.next_lock += 1
         return Lock(index)
+
+    def get_cn_lock(self, cn: ComputationNode) -> Lock:
+        if cn not in self.cn_locks:
+            self.cn_locks[cn] = self.new_lock()
+        return self.cn_locks[cn]
 
     def new_profile(self, info: ProfileInfo) -> Profile:
         assert isinstance(info, ProfileInfo)
@@ -162,68 +200,98 @@ def name_to_c_upper(name: str):
     return name.replace(".", "_").replace("/", "_").replace("::", "_").replace(":", "_").upper()
 
 
-def visit_node(state: State, cn: ComputationNode, zcme: CostModelEvaluation):
-    input_name, weight_name, _ = cn.input_names
-    output_name, = cn.output_names
-
-    input = state.get_buffer(input_name)
-    weight = state.get_buffer(weight_name)
-
-    output_loop_dims = cn.operand_tensors['O'].loop_ranges
-    output_shape = []
-    for start, end in output_loop_dims:
-        assert start == 0
-        output_shape.append(end)
-
-    output = state.define_buffer(output_name, tuple(output_shape), dtype=DataType.Int8, const=False, transposed=False)
-    output.ready_lock = state.new_lock()
-
-    loop_ranges = cn.loop_ranges
-    temporal = zcme.temporal_mapping
-    spatial = zcme.spatial_mapping
-
-    print(f"  loop_ranges: {loop_ranges}")
-    print(f"  temporal: {temporal}")
-    print(f"  spatial: {spatial}")
-
-    dim_size = cn.loop_dim_size
-
+def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvaluation):
     core = cn.get_core_allocation()
 
-    # TODO ensure no IMA contention?
+    orig_cn = cn.original_node if cn.original_node is not None else cn
+    print(f"  loop_ranges: {cn.loop_ranges}")
+    print(f"  temporal: {zcme.temporal_mapping}")
+    print(f"  spatial: {zcme.spatial_mapping}")
 
     if cn.equation == 'O[b][k]+=A[b][c]*B[c][k]':
-        # wait for inputs
+        # get inputs
+        # TODO use bias
+        input_name, weight_name, _ = cn.input_names
+        output_name, = cn.output_names
+
+        input = state.get_buffer(input_name)
+        weight = state.get_buffer(weight_name)
+
+        # figure out ranges
+        assert orig_cn.loop_ranges.keys() == {"B", "K", "C"}, orig_cn.loop_ranges.keys()
+        assert cn.loop_ranges.keys() == {"B", "K", "C"}, cn.loop_ranges.keys()
+        (b_start, b_end) = cn.loop_ranges["B"]
+        (k_start, k_end) = cn.loop_ranges["K"]
+        (c_start, c_end) = cn.loop_ranges["C"]
+        (b_zero, b_full) = orig_cn.loop_ranges["B"]
+        (k_zero, k_full) = orig_cn.loop_ranges["K"]
+        (c_zero, c_full) = orig_cn.loop_ranges["C"]
+        assert b_zero == 0 and k_zero == 0 and c_zero == 0
+
+        state.push_operation(core, OperationComment(
+            f"matmul b={b_start}..{b_end}, k={k_start}..{k_end}, c={c_start}..{c_end}"))
+
+        # get full output buffer
+        output = state.define_buffer(
+            output_name, (b_full, k_full), dtype=DataType.Int8,
+            const=False, transposed=False,
+            allow_existing=True
+        )
+
+        full_input = input.tensor()
+        full_weight = weight.tensor()
+        full_output = output.tensor()
+
+        piece_input = full_input[b_start:b_end, c_start:c_end]
+        piece_weight = full_weight[k_start:k_end, c_start:c_end]
+        piece_output = full_output[b_start:b_end, k_start:k_end]
+
+        # allocate temporary buffers
+        # TODO we can just reuse the same buffer, or at least we can reuse in/weight for output
+        tmp_alloc = Allocator()
+        tmp_input = tmp_alloc.alloc(piece_input.size_bytes)
+        tmp_weight = tmp_alloc.alloc(piece_weight.size_bytes)
+        tmp_output = tmp_alloc.alloc(piece_output.size_bytes)
+
+        # allocate space for temporary buffers in L1 and L2
+        state.tmp_size_per_core[core] = max(len(tmp_alloc), state.tmp_size_per_core[core])
+
+        # wait for dependencies
         state.push_cycles(core, "start", "wait")
-        if input.ready_lock is not None:
-            state.push_operation(core, OperationLockWait(input.ready_lock, 1))
-        if weight.ready_lock is not None:
-            state.push_operation(core, OperationLockWait(weight.ready_lock, 1))
+        for (prev, _) in workload.in_edges(cn):
+            state.push_operation(core, OperationLockWait(state.get_cn_lock(prev), 1))
         state.push_cycles(core, "end", "wait")
 
         # copy inputs
+        start_l1 = Pointer(f"L1_START_C{core}", MemoryKind.L1)
+        start_l2 = Pointer(f"L2_START_C{core}", MemoryKind.L2)
+
         state.push_cycles(core, "start", "input")
-        state.push_operation(core, OperationCopy(input.pointer_l2, input.pointer_l3, input.size_bytes))
-        state.push_operation(core, OperationCopy(input.pointers_l1[core], input.pointer_l2, input.size_bytes))
-        state.push_operation(core, OperationCopy(weight.pointer_l2, weight.pointer_l3, weight.size_bytes))
-        state.push_operation(core, OperationCopy(weight.pointers_l1[core], weight.pointer_l2, weight.size_bytes))
+
+        state.push_copy_tensor(core, input.pointer_l3, start_l2.offset(tmp_input), piece_input, True)
+        state.push_copy(core, start_l1.offset(tmp_input), start_l2.offset(tmp_input), piece_input.size_bytes)
+
+        state.push_copy_tensor(core, weight.pointer_l3, start_l2.offset(tmp_weight), piece_weight, True)
+        state.push_copy(core, start_l1.offset(tmp_weight), start_l2.offset(tmp_weight), piece_weight.size_bytes)
         state.push_cycles(core, "end", "input")
 
         # real operation
         state.push_cycles(core, "start", "calc")
         state.push_operation(core, OperationMatmul(
-            b=dim_size["B"], k=dim_size["K"], c=dim_size["C"],
-            weight=weight.pointers_l1[core], input=input.pointers_l1[core], output=output.pointers_l1[core],
+            b=(b_end - b_start), k=k_end - k_start, c=c_end - c_start,
+            weight=start_l1.offset(tmp_weight), input=start_l1.offset(tmp_input), output=start_l1.offset(tmp_output),
             profile=state.new_profile(ProfileInfo(core=f"core_{core}_mm", name="matmul")),
         ))
         state.push_cycles(core, "end", "calc")
 
         # copy output
         state.push_cycles(core, "start", "output")
-        state.push_operation(core, OperationCopy(output.pointer_l2, output.pointers_l1[core], output.size_bytes))
-        state.push_operation(core, OperationCopy(output.pointer_l3, output.pointer_l2, output.size_bytes))
-        state.push_operation(core, OperationLockIncrement(output.ready_lock))
+        state.push_copy(core, start_l2.offset(tmp_output), start_l1.offset(tmp_output), piece_output.size_bytes)
+        state.push_copy_tensor(core, output.pointer_l3, start_l2.offset(tmp_output), piece_output, False)
+
+        state.push_operation(core, OperationLockIncrement(state.get_cn_lock(cn)))
         state.push_cycles(core, "end", "output")
+
         state.push_operation(core, OperationPad())
 
         # simulate
@@ -276,9 +344,10 @@ def generate_func_init(f, state: State):
     f.writeln("i32 generated_init_cluster(int cluster_id, struct pi_device *cluster_device) {")
     with f:
         for i in range(state.core_count):
+            core_l1_size = state.tmp_size_per_core[i]
             f.writeln(f"if (cluster_id == {i}) {{")
             with f:
-                f.writeln(f"L1_START_C{i} = pi_l1_malloc(cluster_device, L1_SIZE);")
+                f.writeln(f"L1_START_C{i} = pi_l1_malloc(cluster_device, {core_l1_size});")
                 f.writeln(f"if (L1_START_C{i} == NULL) {{")
                 with f:
                     f.writeln("return -1;")
@@ -293,9 +362,10 @@ def generate_func_final(f, state: State):
     f.writeln("void generated_final_cluster(int cluster_id, struct pi_device *cluster_device) {")
     with f:
         for i in range(state.core_count):
+            core_l1_size = state.tmp_size_per_core[i]
             f.writeln(f"if (cluster_id == {i}) {{")
             with f:
-                f.writeln(f"pi_l1_free(cluster_device, L1_START_C{i}, L1_SIZE);")
+                f.writeln(f"pi_l1_free(cluster_device, L1_START_C{i}, {core_l1_size});")
             f.writeln("}")
     f.writeln("}")
     f.writeln()
@@ -332,15 +402,11 @@ def generate_func_core(f, state: State, core):
 
 
 def generate_data(f, state: State, d_bin):
-    alloc_l1 = Allocator()
     alloc_l3_const = Allocator()
     alloc_l3_dyn = Allocator()
 
     for name, buffer in state.buffers.items():
         upper = name_to_c_upper(name)
-
-        f.writeln(f"#define L1_OFFSET_{upper} {alloc_l1.alloc(buffer.size_bytes)}")
-        f.writeln(f"PI_L2 i8 {buffer.pointer_l2}[{buffer.size_bytes}];")
 
         if buffer.sim_value is not None:
             offset = alloc_l3_const.alloc(buffer.size_bytes)
@@ -369,10 +435,15 @@ def generate_data(f, state: State, d_bin):
             f.writeln(f"#define {offset_name} {offset}")
 
     f.writeln()
+
     for i in range(state.core_count):
         f.writeln(f"static PI_L1 u8 *L1_START_C{i} = NULL;")
-    f.writeln(f"#define L1_SIZE {len(alloc_l1)}")
     f.writeln()
+
+    for i in range(state.core_count):
+        f.writeln(f"static PI_L2 u8 L2_START_C{i}[{state.tmp_size_per_core[i]}];")
+    f.writeln()
+
     f.writeln("static u32 L3_CONST_START = 0;")
     f.writeln("static u32 L3_DYN_START = 0;")
     f.writeln(f"#define L3_CONST_SIZE {len(alloc_l3_const)}")
@@ -454,7 +525,7 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
         print(f"  inputs: {cn.input_names}")
         print(f"  outputs: {cn.output_names}")
 
-        visit_node(state, cn, zcme)
+        visit_node(state, workload, cn, zcme)
 
     # insert some additional profiling
     # for core in range(len(state.operations_per_core)):
