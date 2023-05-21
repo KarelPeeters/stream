@@ -410,6 +410,7 @@ class GenerateCNWorkloadHybridStage(Stage):
                 node_output_names,
                 op_type=original_node.type,
                 produces_final_output=produces_final_output,
+                original_node=original_node,
             )
 
             # Initialize the priorities (total inter-CN data reuse factor) for the constant operands of this finer_node

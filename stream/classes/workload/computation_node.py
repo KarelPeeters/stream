@@ -32,10 +32,12 @@ class ComputationNode(LayerNode, Node):
         op_type="computation",
         produces_final_output=False,
         add_missing_node_attrs=False,
+        original_node=None,
     ):
         assert isinstance(
             node_id, tuple
         ), "node_id of ComputationNode initialization should be a tuple: (Layer number, Node number of that layer)"
+
 
         if isinstance(node_attrs["core_allocation"], int):
             node_attrs["core_allocation"] = [node_attrs["core_allocation"]]
@@ -51,6 +53,8 @@ class ComputationNode(LayerNode, Node):
             input_names=input_names,
             output_names=output_names,
         )
+
+        self.original_node = original_node
 
         # Save whether this ComputationNode produces a final output
         self.produces_final_output = produces_final_output
