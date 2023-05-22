@@ -49,50 +49,58 @@ def get_memory_hierarchy(multiplier_array, width: int, height: int, weight_size:
         r_port=2, w_port=2, rw_port=0, latency=1
     )
 
-    # trick to make weight loading extremely slow
-    #   * bandwidth: 4 weights per cycle, like the real accelerator
-    #   * size just large enough to fit lower level
-    factor = 1 / 8
-    weight_bottleneck = basic_memory_instance(
-        "weight_bottleneck", size=width * height * weight_size,
-        w_bw=factor * weight_size, r_bw=factor * weight_size, w_port=1, r_port=1, rw_port=0,
-    )
+    # # trick to make weight loading extremely slow
+    # #   * bandwidth: 4 weights per cycle, like the real accelerator
+    # #   * size just large enough to fit lower level
+    # factor = 1 / 8
+    # weight_bottleneck = basic_memory_instance(
+    #     "weight_bottleneck", size=width * height * weight_size,
+    #     w_bw=factor * weight_size, r_bw=factor * weight_size, w_port=1, r_port=1, rw_port=0,
+    # )
+
+    # weight_inf = basic_memory_instance(
+    #     "weight_inf", size=width * height * weight_size,
+    #     w_bw=1, r_bw=
+    # )
+
+    real_l12_bw = 64*8
 
     # actual memories
     l1 = basic_memory_instance(
-        name="L1", size=0x00010000, r_bw=8 * 8, w_bw=8 * 8, r_port=2, w_port=2, rw_port=0,
+        name="L1", size=0x00100000, r_bw=real_l12_bw, w_bw=real_l12_bw, r_port=2, w_port=2, rw_port=0,
     )
     l2 = basic_memory_instance(
-        name="L2", size=0x00080000, r_bw=8 * 8, w_bw=8 * 8, r_port=2, w_port=2, rw_port=0,
+        name="L2", size=0x60000000, r_bw=real_l12_bw, w_bw=real_l12_bw, r_port=2, w_port=2, rw_port=0,
     )
 
     memory_hierarchy_graph = MemoryHierarchy(operational_array=multiplier_array)
 
-    memory_hierarchy_graph.add_memory(
-        memory_instance=reg_input,
-        operands=('I1',),
-        port_alloc=({'fh': 'w_port_1', 'tl': 'r_port_1', 'fl': None, 'th': None},),
-        served_dimensions={(1, 0)}
-    )
-    memory_hierarchy_graph.add_memory(
-        memory_instance=reg_weight,
-        operands=('I2',),
-        port_alloc=({'fh': 'w_port_1', 'tl': 'r_port_1', 'fl': None, 'th': None},),
-        served_dimensions={(0, 0)}
-    )
-    memory_hierarchy_graph.add_memory(
-        memory_instance=reg_output,
-        operands=('O',),
-        port_alloc=({'fh': 'w_port_1', 'tl': 'r_port_1', 'fl': 'w_port_2', 'th': 'r_port_2'},),
-        served_dimensions={(0, 1)}
-    )
+    # memory_hierarchy_graph.add_memory(
+    #     memory_instance=reg_input,
+    #     operands=('I1',),
+    #     port_alloc=({'fh': 'w_port_1', 'tl': 'r_port_1', 'fl': None, 'th': None},),
+    #     served_dimensions={(1, 0)}
+    # )
+    # memory_hierarchy_graph.add_memory(
+    #     memory_instance=reg_weight,
+    #     operands=('I2',),
+    #     port_alloc=({'fh': 'w_port_1', 'tl': 'r_port_1', 'fl': None, 'th': None},),
+    #     served_dimensions={(0, 0)}
+    # )
+    # memory_hierarchy_graph.add_memory(
+    #     memory_instance=reg_output,
+    #     operands=('O',),
+    #     operands=('O',),
+    #     port_alloc=({'fh': 'w_port_1', 'tl': 'r_port_1', 'fl': 'w_port_2', 'th': 'r_port_2'},),
+    #     served_dimensions={(0, 1)}
+    # )
 
-    memory_hierarchy_graph.add_memory(
-        memory_instance=weight_bottleneck,
-        operands=('I2',),
-        port_alloc=({'fh': 'w_port_1', 'tl': 'r_port_1', 'fl': None, 'th': None},),
-        served_dimensions='all',
-    )
+    # memory_hierarchy_graph.add_memory(
+    #     memory_instance=weight_bottleneck,
+    #     operands=('I2',),
+    #     port_alloc=({'fh': 'w_port_1', 'tl': 'r_port_1', 'fl': None, 'th': None},),
+    #     served_dimensions='all',
+    # )
 
     memory_hierarchy_graph.add_memory(
         memory_instance=l1,
@@ -137,10 +145,10 @@ def get_operational_array(width: int, height: int):
 
 def get_dataflows(width: int, height: int):
     # TODO figure out the syntax for combined unrolling here
-    return None
-    # return [{'D1': ('K', 32), 'D2': ('C', 32)}]
+    # return None
     # return [{'D1': ('K', 16), 'D2': ('C', 16), 'D3': ('OX', 4), 'D4': ('FX', 3)}]
     # return []
+    return [{'D1': ('K', height), 'D2': ('C', width)}]
 
 
 def get_ima_core(id, width: int, height: int, weight_size: int):
@@ -167,9 +175,10 @@ def get_offchip_core(id):
     multiplier_array = get_dummy_multiplier_array()
 
     # actual size 0x00800000, but just use "infinity" here for now
+    # TODO model that strided 2D reads are a lot slower
     l3 = basic_memory_instance(
         name="l3", size=10000000000,
-        r_bw=8/4, w_bw=8/4, r_port=0, w_port=0, rw_port=1,
+        r_bw=1, w_bw=1, r_port=0, w_port=0, rw_port=1,
     )
 
     memory_hierarchy_graph = MemoryHierarchy(operational_array=multiplier_array)

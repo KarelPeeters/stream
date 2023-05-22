@@ -15,6 +15,7 @@ from stream.api_edited import save_graph
 from stream.classes.cost_model.cost_model import StreamCostModelEvaluation
 from stream.classes.hardware.architecture.communication_link import CommunicationLink
 from stream.classes.stages import *
+from stream.ext.ima_mapping_stage import ImaIntraCoreMappingState
 from stream.inputs.testing.hardware.custom.ima import ima_with_offchip
 
 
@@ -43,7 +44,7 @@ def get_hardware_performance_stream(hardware, workload, mapping, CN_define_mode,
         # UserDefinedModelParserStage,  # Parses the user-defined Model into the workload
         GenerateCNWorkloadHybridStage,
         DebugStage,
-        IntraCoreMappingStage,
+        ImaIntraCoreMappingState,
         InterCoreMappingStage,
     ],
 
@@ -128,7 +129,7 @@ def print_workload_per_core(scme: StreamCostModelEvaluation):
 def export_onnx(path):
     print("Exporting ONNX model")
     n = 256
-    c = 16
+    c = 64
     s = 32
 
     network = nn.Sequential(
@@ -160,7 +161,7 @@ def main():
 
     # accelerator = 'inputs.testing.hardware.dual_testing_core_offchip'
     # TODO use weight_size=4 at some point
-    accelerator = ima_with_offchip(2, 1000, 1000, 8)
+    accelerator = ima_with_offchip(2, 256, 256, 8)
     # workload = 'inputs.testing.workload.testing_workload_for_2_cores'
     # workload = 'inputs.testing.workload.simple_example_workload'
     # workload = r"C:\Documents\Programming\Python\MLPlayGround\branching_conv.onnx"
