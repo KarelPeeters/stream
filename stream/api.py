@@ -134,7 +134,12 @@ def export_onnx(path):
 
     network = nn.Sequential(
         nn.Linear(c, c),
-        nn.Linear(c, 2 * c),
+        nn.Linear(c, c),
+        nn.Linear(c, c),
+        nn.Linear(c, c),
+        nn.Linear(c, c),
+        nn.Linear(c, c),
+        nn.Linear(c, c),
     )
 
     input = torch.randn(n, c)
@@ -188,7 +193,9 @@ def main():
     from stream.visualization.schedule import plot_timeline_brokenaxes
 
     # TODO clean up plotting bools and blocking
+    # TODO why does simulate false cause out-of-bounds RAM errors?
     generate = True
+    simulate = True
     run = True
     plot_stream = True
     plot_profile = True
@@ -217,8 +224,11 @@ def main():
 
         pulp_sdk_path = r"~/new-attempt/pulp-sdk"
         project_path = r"~/new-attempt/pulp-sdk/applications/custom"
-        compile_and_run(workload, scme[0], node_hw_performances, pulp_sdk_path, project_path, run=run,
-                        plot=plot_profile)
+        compile_and_run(
+            workload, scme[0], node_hw_performances,
+            pulp_sdk_path, project_path,
+            simulate=simulate, run=run, plot=plot_profile
+        )
 
 
 if __name__ == "__main__":

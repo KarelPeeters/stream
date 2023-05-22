@@ -62,9 +62,9 @@ class Allocator:
 
 
 class State:
-    def __init__(self, onnx_model: ModelProto, core_count: int, sim: bool):
+    def __init__(self, onnx_model: ModelProto, core_count: int, simulate: bool):
         self.onnx_model = onnx_model
-        self.sim = sim
+        self.simulate = simulate
 
         self.buffers: Dict[str, Buffer] = {}
         self.core_count = core_count
@@ -294,8 +294,7 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
 
         state.push_operation(core, OperationPad())
 
-        # simulate
-        if state.sim:
+        if state.simulate:
             assert weight.transposed
             output.sim_value = ima_matmul(input.sim_value, weight.sim_value)
     else:
@@ -487,7 +486,7 @@ def generate_code(state: State, project_path):
         generate_core_dispatch(f, len(state.operations_per_core))
 
 
-def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, project_path, run: bool, plot: bool):
+def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, project_path, simulate: bool, run: bool, plot: bool):
     print("Collecting workload")
 
     assert onnx_path.endswith(".onnx")
@@ -500,7 +499,7 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
     cluster_cores = len(accelerator.cores) - 1
 
     np.random.seed(0)
-    state = State(onnx_model, cluster_cores, sim=True)
+    state = State(onnx_model, cluster_cores, simulate=simulate)
 
     for cn in workload:
         cn: ComputationNode
