@@ -87,8 +87,7 @@ class ImaCostModelEvaluation(CostModelEvaluation):
         job_cycles = job_offset + factor * b
         total_cycles = plot_cycles + job_cycles
 
-        print(f"IMA cost evaluation for {b}x{k}x{c} => {plot_cycles}+{job_cycles}={total_cycles}")
-
+        # print(f"IMA cost evaluation for {b}x{k}x{c} => {plot_cycles}+{job_cycles}={total_cycles}")
         # TODO is this okay?
         self.latency_total1 = total_cycles
         self.latency_total2 = total_cycles
