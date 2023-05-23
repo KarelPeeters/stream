@@ -130,6 +130,16 @@ class OperationCopy2D(Operation):
 
     def generate_code(self, f, state):
         assert self.upper.kind == MemoryKind.L3 and self.lower.kind == MemoryKind.L2
+
+        # TODO switch back to 1D copies if applicable
+        # if self.length_bytes == self.stride_bytes or self.size_bytes == self.length_bytes:
+        #     if self.dir_down:
+        #         op = OperationCopy(self.lower, self.upper, self.size_bytes)
+        #     else:
+        #         op = OperationCopy(self.upper, self.lower, self.size_bytes)
+        #     op.generate_code(f, state)
+        #     return
+
         f.writeln(
             f"pi_cl_ram_copy_2d_blocking(ram, {self.upper}, {self.lower}, {self.size_bytes}, {self.stride_bytes}, {self.length_bytes}, {int(self.dir_down)});")
 
@@ -195,6 +205,7 @@ class OperationComment(Operation):
     def generate_code(self, f, state):
         for line in self.text.splitlines():
             f.writeln(f"// {line}")
+
 
 @dataclass
 class Tensor:
