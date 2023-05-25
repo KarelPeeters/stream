@@ -63,7 +63,7 @@ def get_memory_hierarchy(multiplier_array, width: int, height: int, weight_size:
     #     w_bw=1, r_bw=
     # )
 
-    real_l12_bw = 64*8
+    real_l12_bw = 64 * 8
 
     # actual memories
     l1 = basic_memory_instance(
@@ -234,9 +234,7 @@ def ima_with_offchip(core_count: int, width: int, height: int, weight_size: int)
     offchip_core = get_offchip_core(id=offchip_core_id)
     cores_graph = get_cores_graph(cores, offchip_core, 0)
 
-    global_buffer = None
-    accelerator = Accelerator("Testing-2-core-with-offchip", cores_graph, global_buffer,
-                              offchip_core_id=offchip_core_id)
+    accelerator = Accelerator("Testing-2-core-with-offchip", cores_graph, offchip_core_id=offchip_core_id)
     return accelerator
 
 
