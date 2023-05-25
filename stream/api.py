@@ -7,7 +7,6 @@ import onnx
 import torch
 from matplotlib import pyplot as plt
 from onnx import shape_inference
-from torch import nn
 from zigzag.classes.stages import *
 
 from compiler.main import compile_and_run
@@ -17,6 +16,7 @@ from stream.classes.hardware.architecture.communication_link import Communicatio
 from stream.classes.stages import *
 from stream.ext.ima_mapping_stage import ImaIntraCoreMappingState
 from stream.inputs.testing.hardware.custom.ima import ima_with_offchip
+from stream.test_network import TestNetwork
 
 
 class DebugStage(Stage):
@@ -126,41 +126,12 @@ def print_workload_per_core(scme: StreamCostModelEvaluation):
                 print(f"    {time_str(start, end)} {kind} {operand} {origin}")
 
 
-class TestNetwork(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        n = 512
-        c = 64
-        s = 32
-
-        self.example_input = torch.randn(n, c)
-
-        self.left = nn.Sequential(
-            nn.Linear(c, c),
-            nn.Linear(c, c),
-            # nn.Linear(c, c),
-            # nn.Linear(c, c),
-        )
-        self.right = nn.Sequential(
-            nn.Linear(c, c),
-            nn.Linear(c, c),
-            # nn.Linear(c, c),
-        )
-
-    def forward(self, x):
-        # return self.left(x)
-        # , self.right(x)
-
-        return self.left(x)
-
-
 def export_onnx(path):
     print("Exporting ONNX model")
 
     network = TestNetwork()
 
-    input = network.example_input
+    input = network.example_input()
     _ = network(input)
     torch.onnx.export(network, input, path)
 
@@ -213,7 +184,7 @@ def main():
     # TODO clean up plotting bools and blocking
     # TODO why does simulate false cause out-of-bounds RAM errors?
     generate = True
-    simulate = True
+    simulate = True  # TODO get no-simulation to work
     run = True
     plot_stream = True
     plot_profile = True
@@ -233,9 +204,6 @@ def main():
                                      percent_shown, plot_data_transfer, fig_path=timeline_fig_path)
         # plot_memory_usage(scme[0].accelerator.memory_manager, fig_path=memory_fig_path)
         # bar_plot_stream_cost_model_evaluations_breakdown([scme], fig_path=energy_fig_path)
-
-        if not generate:
-            plt.show()
 
     if generate:
         with open(node_hw_performances_path, "rb") as f:

@@ -7,7 +7,6 @@ import onnx
 from networkx import DiGraph
 from onnx import ModelProto
 from zigzag.classes.cost_model.cost_model import CostModelEvaluation
-from zigzag.classes.mapping.combined_mapping import Mapping
 
 from compiler.allocator import LinearAllocator
 from compiler.codegen import DataType, array_to_bytes
@@ -191,122 +190,122 @@ def name_to_c_upper(name: str):
     return name.replace(".", "_").replace("/", "_").replace("::", "_").replace(":", "_").upper()
 
 
+def visit_matmul(core: int, workload, cn: ComputationNode, orig_cn: ComputationNode, state: State):
+    # get inputs
+    # TODO use bias
+    input_name, weight_name, _ = cn.input_names
+    output_name, = cn.output_names
+
+    input = state.get_buffer(input_name)
+    weight = state.get_buffer(weight_name)
+
+    # figure out ranges
+    assert orig_cn.loop_ranges.keys() == {"B", "K", "C"}, orig_cn.loop_ranges.keys()
+    assert cn.loop_ranges.keys() == {"B", "K", "C"}, cn.loop_ranges.keys()
+    (b_start, b_end) = cn.loop_ranges["B"]
+    (k_start, k_end) = cn.loop_ranges["K"]
+    (c_start, c_end) = cn.loop_ranges["C"]
+    (b_zero, b_full) = orig_cn.loop_ranges["B"]
+    (k_zero, k_full) = orig_cn.loop_ranges["K"]
+    (c_zero, c_full) = orig_cn.loop_ranges["C"]
+    assert b_zero == 0 and k_zero == 0 and c_zero == 0
+
+    state.push_operation(core, OperationComment(
+        f"matmul b={b_start}..{b_end}, k={k_start}..{k_end}, c={c_start}..{c_end}"))
+
+    # get full output buffer
+    output = state.define_buffer(
+        output_name, (b_full, k_full), dtype=DataType.Int8,
+        const=False, transposed=False,
+        allow_existing=True
+    )
+
+    full_input = input.tensor()
+    full_weight = weight.tensor()
+    full_output = output.tensor()
+
+    piece_input = full_input[b_start:b_end, c_start:c_end]
+    piece_weight = full_weight[k_start:k_end, c_start:c_end]
+    piece_output = full_output[b_start:b_end, k_start:k_end]
+
+    # allocate temporary buffers
+    # TODO we can just reuse the same buffer, or at least we can reuse in/weight for output
+    tmp_alloc = LinearAllocator()
+    tmp_input = tmp_alloc.alloc(piece_input.size_bytes)
+    tmp_weight = tmp_alloc.alloc(piece_weight.size_bytes)
+    tmp_output = tmp_alloc.alloc(piece_output.size_bytes)
+
+    # allocate space for temporary buffers in L1 and L2
+    state.tmp_size_per_core[core] = max(len(tmp_alloc), state.tmp_size_per_core[core])
+
+    # wait for dependencies (this automatically handles the split input case)
+    state.push_cycles(core, "start", "wait")
+    for (prev, _) in workload.in_edges(cn):
+        state.push_operation(core, OperationLockWait(state.get_cn_lock(prev), 1))
+    state.push_cycles(core, "end", "wait")
+
+    start_l1 = Pointer(f"L1_START_C{core}", MemoryKind.L1)
+    start_l2 = Pointer(f"L2_START_C{core}", MemoryKind.L2)
+
+    # fabric operations
+    fabric_in_start = state.new_lock()
+    fabric_in_done = state.new_lock()
+    fabric_out_start = state.new_lock()
+    fabric_out_done = state.new_lock()
+
+    state.push_operation(None, OperationLockWait(fabric_in_start, 1))
+    state.push_cycles(None, "start", "down")
+    state.push_copy_tensor(None, input.pointer_l3, start_l2.offset(tmp_input), piece_input, True)
+    state.push_copy_tensor(None, weight.pointer_l3, start_l2.offset(tmp_weight), piece_weight, True)
+    state.push_operation(None, OperationLockIncrement(fabric_in_done))
+    state.push_cycles(None, "end", "down")
+    state.push_operation(None, OperationPad())
+
+    state.push_operation(None, OperationLockWait(fabric_out_start, 1))
+    state.push_cycles(None, "start", "up")
+    state.push_copy_tensor(None, output.pointer_l3, start_l2.offset(tmp_output), piece_output, False)
+    state.push_operation(None, OperationLockIncrement(fabric_out_done))
+    state.push_cycles(None, "end", "up")
+    state.push_operation(None, OperationPad())
+
+    # copy inputs
+    state.push_cycles(core, "start", "input")
+    state.push_operation(core, OperationLockIncrement(fabric_in_start))
+    state.push_operation(core, OperationLockWait(fabric_in_done, 1))
+    state.push_copy(core, start_l1.offset(tmp_input), start_l2.offset(tmp_input), piece_input.size_bytes)
+    state.push_copy(core, start_l1.offset(tmp_weight), start_l2.offset(tmp_weight), piece_weight.size_bytes)
+    state.push_cycles(core, "end", "input")
+
+    # real operation
+    state.push_cycles(core, "start", "calc")
+    state.push_operation(core, OperationMatmul(
+        b=(b_end - b_start), k=k_end - k_start, c=c_end - c_start,
+        weight=start_l1.offset(tmp_weight), input=start_l1.offset(tmp_input), output=start_l1.offset(tmp_output),
+        profile=state.new_profile(ProfileInfo(core=f"ima_core_{core}", name="matmul")),
+    ))
+    state.push_cycles(core, "end", "calc")
+
+    # copy output
+    state.push_cycles(core, "start", "output")
+    state.push_copy(core, start_l2.offset(tmp_output), start_l1.offset(tmp_output), piece_output.size_bytes)
+    state.push_operation(core, OperationLockIncrement(fabric_out_start))
+    state.push_operation(core, OperationLockWait(fabric_out_done, 1))
+    state.push_operation(core, OperationLockIncrement(state.get_cn_lock(cn)))
+    state.push_cycles(core, "end", "output")
+
+    state.push_operation(core, OperationPad())
+
+    if state.simulate:
+        assert weight.transposed
+        output.sim_value = ima_matmul(input.sim_value, weight.sim_value)
+
+
 def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvaluation):
     core = cn.get_core_allocation()
-
     orig_cn = cn.original_node if cn.original_node is not None else cn
-    print(f"  loop_ranges: {cn.loop_ranges}")
-    print(f"  temporal: {zcme.temporal_mapping}")
-    print(f"  spatial: {zcme.spatial_mapping}")
 
     if cn.equation == 'O[b][k]+=A[b][c]*B[c][k]':
-        # get inputs
-        # TODO use bias
-        input_name, weight_name, _ = cn.input_names
-        output_name, = cn.output_names
-
-        input = state.get_buffer(input_name)
-        weight = state.get_buffer(weight_name)
-
-        # figure out ranges
-        assert orig_cn.loop_ranges.keys() == {"B", "K", "C"}, orig_cn.loop_ranges.keys()
-        assert cn.loop_ranges.keys() == {"B", "K", "C"}, cn.loop_ranges.keys()
-        (b_start, b_end) = cn.loop_ranges["B"]
-        (k_start, k_end) = cn.loop_ranges["K"]
-        (c_start, c_end) = cn.loop_ranges["C"]
-        (b_zero, b_full) = orig_cn.loop_ranges["B"]
-        (k_zero, k_full) = orig_cn.loop_ranges["K"]
-        (c_zero, c_full) = orig_cn.loop_ranges["C"]
-        assert b_zero == 0 and k_zero == 0 and c_zero == 0
-
-        state.push_operation(core, OperationComment(
-            f"matmul b={b_start}..{b_end}, k={k_start}..{k_end}, c={c_start}..{c_end}"))
-
-        # get full output buffer
-        output = state.define_buffer(
-            output_name, (b_full, k_full), dtype=DataType.Int8,
-            const=False, transposed=False,
-            allow_existing=True
-        )
-
-        full_input = input.tensor()
-        full_weight = weight.tensor()
-        full_output = output.tensor()
-
-        piece_input = full_input[b_start:b_end, c_start:c_end]
-        piece_weight = full_weight[k_start:k_end, c_start:c_end]
-        piece_output = full_output[b_start:b_end, k_start:k_end]
-
-        # allocate temporary buffers
-        # TODO we can just reuse the same buffer, or at least we can reuse in/weight for output
-        tmp_alloc = LinearAllocator()
-        tmp_input = tmp_alloc.alloc(piece_input.size_bytes)
-        tmp_weight = tmp_alloc.alloc(piece_weight.size_bytes)
-        tmp_output = tmp_alloc.alloc(piece_output.size_bytes)
-
-        # allocate space for temporary buffers in L1 and L2
-        state.tmp_size_per_core[core] = max(len(tmp_alloc), state.tmp_size_per_core[core])
-
-        # wait for dependencies (this automatically handles the split input case)
-        state.push_cycles(core, "start", "wait")
-        for (prev, _) in workload.in_edges(cn):
-            state.push_operation(core, OperationLockWait(state.get_cn_lock(prev), 1))
-        state.push_cycles(core, "end", "wait")
-
-        start_l1 = Pointer(f"L1_START_C{core}", MemoryKind.L1)
-        start_l2 = Pointer(f"L2_START_C{core}", MemoryKind.L2)
-
-        # fabric operations
-        fabric_in_start = state.new_lock()
-        fabric_in_done = state.new_lock()
-        fabric_out_start = state.new_lock()
-        fabric_out_done = state.new_lock()
-
-        state.push_operation(None, OperationLockWait(fabric_in_start, 1))
-        state.push_cycles(None, "start", "down")
-        state.push_copy_tensor(None, input.pointer_l3, start_l2.offset(tmp_input), piece_input, True)
-        state.push_copy_tensor(None, weight.pointer_l3, start_l2.offset(tmp_weight), piece_weight, True)
-        state.push_operation(None, OperationLockIncrement(fabric_in_done))
-        state.push_cycles(None, "end", "down")
-        state.push_operation(None, OperationPad())
-
-        state.push_operation(None, OperationLockWait(fabric_out_start, 1))
-        state.push_cycles(None, "start", "up")
-        state.push_copy_tensor(None, output.pointer_l3, start_l2.offset(tmp_output), piece_output, False)
-        state.push_operation(None, OperationLockIncrement(fabric_out_done))
-        state.push_cycles(None, "end", "up")
-        state.push_operation(None, OperationPad())
-
-        # copy inputs
-        state.push_cycles(core, "start", "input")
-        state.push_operation(core, OperationLockIncrement(fabric_in_start))
-        state.push_operation(core, OperationLockWait(fabric_in_done, 1))
-        state.push_copy(core, start_l1.offset(tmp_input), start_l2.offset(tmp_input), piece_input.size_bytes)
-        state.push_copy(core, start_l1.offset(tmp_weight), start_l2.offset(tmp_weight), piece_weight.size_bytes)
-        state.push_cycles(core, "end", "input")
-
-        # real operation
-        state.push_cycles(core, "start", "calc")
-        state.push_operation(core, OperationMatmul(
-            b=(b_end - b_start), k=k_end - k_start, c=c_end - c_start,
-            weight=start_l1.offset(tmp_weight), input=start_l1.offset(tmp_input), output=start_l1.offset(tmp_output),
-            profile=state.new_profile(ProfileInfo(core=f"ima_core_{core}", name="matmul")),
-        ))
-        state.push_cycles(core, "end", "calc")
-
-        # copy output
-        state.push_cycles(core, "start", "output")
-        state.push_copy(core, start_l2.offset(tmp_output), start_l1.offset(tmp_output), piece_output.size_bytes)
-        state.push_operation(core, OperationLockIncrement(fabric_out_start))
-        state.push_operation(core, OperationLockWait(fabric_out_done, 1))
-        state.push_operation(core, OperationLockIncrement(state.get_cn_lock(cn)))
-        state.push_cycles(core, "end", "output")
-
-        state.push_operation(core, OperationPad())
-
-        if state.simulate:
-            assert weight.transposed
-            output.sim_value = ima_matmul(input.sim_value, weight.sim_value)
+        visit_matmul(core, workload, cn, orig_cn, state)
     else:
         raise ValueError(f"Unrecognised equation {cn.equation}")
 
@@ -535,30 +534,17 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
 
         key_node = next(other for other in node_hw_performances.keys() if other.id[0] == cn.id[0])
         zcme = next(m for c, m in node_hw_performances[key_node].items() if c.id == core)
-        print(f"  zcme: {zcme}")
 
-        mapping: Mapping = zcme.mapping
-        mapping_temporal = mapping.temporal_mapping
-        mapping_spatial = mapping.spatial_mapping
-
-        print(f"  mapping: {mapping}")
-
-        # dependency edges: (node_from, node_to)
+        print(f"Visiting {cn}")
         print(f"  incoming edge nodes: {list(a for a, _ in workload.in_edges(cn))}")
         print(f"  outgoing edge nodes: {list(b for _, b in workload.out_edges(cn))}")
-
         print(f"  inputs: {cn.input_names}")
         print(f"  outputs: {cn.output_names}")
+        print(f"  loop_ranges: {cn.loop_ranges}")
+        print(f"  temporal: {zcme.temporal_mapping}")
+        print(f"  spatial: {zcme.spatial_mapping}")
 
         visit_node(state, workload, cn, zcme)
-
-    # insert some additional profiling
-    # for core in range(len(state.operations_per_core)):
-    #     if len(state.operations_per_core[core]) > 0:
-    #         cycles_start = state.new_cycles(f"start core_{core}")
-    #         cycles_end = state.new_cycles(f"end core_{core}")
-    #         state.operations_per_core[core].insert(0, OperationRecordCycles(cycles_start))
-    #         state.operations_per_core[core].append(OperationRecordCycles(cycles_end))
 
     print("Allocated buffers:")
     for name, buffer in state.buffers.items():
