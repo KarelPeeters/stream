@@ -33,6 +33,9 @@ def plot_profile(stdout: str, output_path: str, block: bool = True):
     for key in key_last_time:
         print(f"warning: {key} didn't end")
 
+    # sort cores
+    core_slices = dict(sorted(core_slices.items()))
+
     for core, slices in core_slices.items():
         print(f"{core}: {slices}")
 

@@ -80,10 +80,6 @@ class State:
             buffer.constant = True
             buffer.sim_value = random_ima_weight(shape)
 
-        # built-in meta vars
-        # self.cycles_start_init = self.new_cycles("start init")
-        # self.cycles_end_init = self.new_cycles("end init")
-
     def get_buffer(self, name):
         return self.buffers[name]
 
@@ -123,8 +119,13 @@ class State:
         else:
             self.operations_per_core[core].append(operation)
 
-    def push_cycles(self, core: int, kind: str, name: str):
-        info = CyclesInfo(core=f"core_{core}", kind=kind, name=name)
+    def push_cycles(self, core: Optional[int], kind: str, name: str):
+        if core is None:
+            core_name = "fabric"
+        else:
+            core_name = f"core_{core}"
+
+        info = CyclesInfo(core=core_name, kind=kind, name=name)
         cycles = self.new_cycles(info)
         self.push_operation(core, OperationRecordCycles(cycles))
 
@@ -262,14 +263,18 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
         fabric_out_done = state.new_lock()
 
         state.push_operation(None, OperationLockWait(fabric_in_start, 1))
+        state.push_cycles(None, "start", "down")
         state.push_copy_tensor(None, input.pointer_l3, start_l2.offset(tmp_input), piece_input, True)
         state.push_copy_tensor(None, weight.pointer_l3, start_l2.offset(tmp_weight), piece_weight, True)
         state.push_operation(None, OperationLockIncrement(fabric_in_done))
+        state.push_cycles(None, "end", "down")
         state.push_operation(None, OperationPad())
 
         state.push_operation(None, OperationLockWait(fabric_out_start, 1))
+        state.push_cycles(None, "start", "up")
         state.push_copy_tensor(None, output.pointer_l3, start_l2.offset(tmp_output), piece_output, False)
         state.push_operation(None, OperationLockIncrement(fabric_out_done))
+        state.push_cycles(None, "end", "up")
         state.push_operation(None, OperationPad())
 
         # copy inputs
@@ -285,7 +290,7 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
         state.push_operation(core, OperationMatmul(
             b=(b_end - b_start), k=k_end - k_start, c=c_end - c_start,
             weight=start_l1.offset(tmp_weight), input=start_l1.offset(tmp_input), output=start_l1.offset(tmp_output),
-            profile=state.new_profile(ProfileInfo(core=f"core_{core}_mm", name="matmul")),
+            profile=state.new_profile(ProfileInfo(core=f"ima_core_{core}", name="matmul")),
         ))
         state.push_cycles(core, "end", "calc")
 
@@ -520,7 +525,9 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
     np.random.seed(0)
     state = State(onnx_model, cluster_cores, simulate=simulate)
 
-    for cn in workload:
+    nodes = sorted(workload, key=lambda node: node.start)
+
+    for cn in nodes:
         cn: ComputationNode
         print(cn)
 
