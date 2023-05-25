@@ -9,9 +9,9 @@ from onnx import ModelProto
 from zigzag.classes.cost_model.cost_model import CostModelEvaluation
 from zigzag.classes.mapping.combined_mapping import Mapping
 
+from compiler.allocator import LinearAllocator
 from compiler.codegen import DataType, array_to_bytes
 from compiler.ima_simulate import random_ima_input, random_ima_weight, ima_matmul
-from compiler.allocator import LinearAllocator
 from compiler.operation import Operation, MemoryKind, Pointer, Lock, Profile, Cycles, OperationCopy, OperationMatmul, \
     Buffer, OperationPad, CyclesInfo, ProfileInfo, OperationRecordCycles, OperationLockIncrement, OperationLockWait, \
     OperationCopy2D, Tensor, OperationComment
@@ -246,7 +246,7 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
         # allocate space for temporary buffers in L1 and L2
         state.tmp_size_per_core[core] = max(len(tmp_alloc), state.tmp_size_per_core[core])
 
-        # wait for dependencies
+        # wait for dependencies (this automatically handles the split input case)
         state.push_cycles(core, "start", "wait")
         for (prev, _) in workload.in_edges(cn):
             state.push_operation(core, OperationLockWait(state.get_cn_lock(prev), 1))
@@ -290,7 +290,6 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
         state.push_cycles(core, "end", "calc")
 
         # copy output
-        # TODO wait until ALL sub-CNs are done for split input?
         state.push_cycles(core, "start", "output")
         state.push_copy(core, start_l2.offset(tmp_output), start_l1.offset(tmp_output), piece_output.size_bytes)
         state.push_operation(core, OperationLockIncrement(fabric_out_start))
