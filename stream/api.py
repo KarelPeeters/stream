@@ -228,8 +228,9 @@ def main():
         timeline_fig_path = "outputs/schedule_plot.png"
         memory_fig_path = "outputs/memory_plot.png"
         energy_fig_path = "outputs/energy_plot.png"
-        plot_timeline_brokenaxes(scme[0], draw_dependencies, section_start_percent,
-                                 percent_shown, plot_data_transfer, fig_path=timeline_fig_path)
+        with plt.rc_context():
+            plot_timeline_brokenaxes(scme[0], draw_dependencies, section_start_percent,
+                                     percent_shown, plot_data_transfer, fig_path=timeline_fig_path)
         # plot_memory_usage(scme[0].accelerator.memory_manager, fig_path=memory_fig_path)
         # bar_plot_stream_cost_model_evaluations_breakdown([scme], fig_path=energy_fig_path)
 
