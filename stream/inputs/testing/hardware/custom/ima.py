@@ -63,7 +63,8 @@ def get_memory_hierarchy(multiplier_array, width: int, height: int, weight_size:
     #     w_bw=1, r_bw=
     # )
 
-    real_l12_bw = 64 * 8
+    # 8*64 bytes per cycle
+    real_l12_bw = 64 * 8 * 8
 
     # actual memories
     l1 = basic_memory_instance(
@@ -178,7 +179,7 @@ def get_offchip_core(id):
     # TODO model that strided 2D reads are a lot slower
     l3 = basic_memory_instance(
         name="l3", size=10000000000,
-        r_bw=1, w_bw=1, r_port=0, w_port=0, rw_port=1,
+        r_bw=8, w_bw=8, r_port=0, w_port=0, rw_port=1,
     )
 
     memory_hierarchy_graph = MemoryHierarchy(operational_array=multiplier_array)
