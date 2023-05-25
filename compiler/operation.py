@@ -140,8 +140,9 @@ class OperationCopy2D(Operation):
         #     op.generate_code(f, state)
         #     return
 
+        # TODO assert that we are on the fabric controller
         f.writeln(
-            f"pi_cl_ram_copy_2d_blocking(ram, {self.upper}, {self.lower}, {self.size_bytes}, {self.stride_bytes}, {self.length_bytes}, {int(self.dir_down)});")
+            f"pi_ram_copy_2d(ram, {self.upper}, {self.lower}, {self.size_bytes}, {self.stride_bytes}, {self.length_bytes}, {int(self.dir_down)});")
 
 
 @dataclass
@@ -167,6 +168,7 @@ class OperationMatmul(Operation):
         )
 
 
+# TODO just replace with set/wait
 @dataclass
 class OperationLockIncrement(Operation):
     lock: Lock

@@ -126,23 +126,41 @@ def print_workload_per_core(scme: StreamCostModelEvaluation):
                 print(f"    {time_str(start, end)} {kind} {operand} {origin}")
 
 
+class TestNetwork(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        n = 512
+        c = 64
+        s = 32
+
+        self.example_input = torch.randn(n, c)
+
+        self.left = nn.Sequential(
+            nn.Linear(c, c),
+            nn.Linear(c, c),
+            # nn.Linear(c, c),
+            # nn.Linear(c, c),
+        )
+        self.right = nn.Sequential(
+            nn.Linear(c, c),
+            nn.Linear(c, c),
+            # nn.Linear(c, c),
+        )
+
+    def forward(self, x):
+        # return self.left(x)
+        # , self.right(x)
+
+        return self.left(x)
+
+
 def export_onnx(path):
     print("Exporting ONNX model")
-    n = 256
-    c = 64
-    s = 32
 
-    network = nn.Sequential(
-        nn.Linear(c, c),
-        nn.Linear(c, c),
-        nn.Linear(c, c),
-        nn.Linear(c, c),
-        nn.Linear(c, c),
-        nn.Linear(c, c),
-        nn.Linear(c, c),
-    )
+    network = TestNetwork()
 
-    input = torch.randn(n, c)
+    input = network.example_input
     _ = network(input)
     torch.onnx.export(network, input, path)
 

@@ -11,6 +11,7 @@ from zigzag.classes.mapping.combined_mapping import Mapping
 
 from compiler.codegen import DataType, array_to_bytes
 from compiler.ima_simulate import random_ima_input, random_ima_weight, ima_matmul
+from compiler.allocator import LinearAllocator
 from compiler.operation import Operation, MemoryKind, Pointer, Lock, Profile, Cycles, OperationCopy, OperationMatmul, \
     Buffer, OperationPad, CyclesInfo, ProfileInfo, OperationRecordCycles, OperationLockIncrement, OperationLockWait, \
     OperationCopy2D, Tensor, OperationComment
@@ -45,22 +46,6 @@ class Output:
         self.indent = self.indent[:-4]
 
 
-class Allocator:
-    def __init__(self):
-        self.next_offset = 0
-
-    def alloc(self, size):
-        assert int(size) == size
-        size = int(size)
-
-        offset = self.next_offset
-        self.next_offset += size
-        return offset
-
-    def __len__(self):
-        return self.next_offset
-
-
 class State:
     def __init__(self, onnx_model: ModelProto, core_count: int, simulate: bool):
         self.onnx_model = onnx_model
@@ -68,7 +53,9 @@ class State:
 
         self.buffers: Dict[str, Buffer] = {}
         self.core_count = core_count
+
         self.operations_per_core: List[List[Operation]] = [[] for _ in range(core_count)]
+        self.operations_fabric: List[Operation] = []
 
         self.tmp_size_per_core: List[int] = [0 for _ in range(core_count)]
         self.cn_locks = dict()
@@ -130,8 +117,11 @@ class State:
         self.buffers[name] = buffer
         return buffer
 
-    def push_operation(self, core: int, operation: Operation):
-        self.operations_per_core[core].append(operation)
+    def push_operation(self, core: Optional[int], operation: Operation):
+        if core is None:
+            self.operations_fabric.append(operation)
+        else:
+            self.operations_per_core[core].append(operation)
 
     def push_cycles(self, core: int, kind: str, name: str):
         info = CyclesInfo(core=f"core_{core}", kind=kind, name=name)
@@ -142,7 +132,7 @@ class State:
         op = OperationCopy(dest=dest, src=src, size_bytes=size_bytes)
         self.push_operation(core, op)
 
-    def push_copy_tensor(self, core: int, upper: Pointer, lower: Pointer, tensor: Tensor, down: bool):
+    def push_copy_tensor(self, core: Optional[int], upper: Pointer, lower: Pointer, tensor: Tensor, down: bool):
         # TODO generalize to other ranks
         assert tensor.rank == 2, f"Can only copy 2D tensors for now, got {tensor}"
 
@@ -248,7 +238,7 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
 
         # allocate temporary buffers
         # TODO we can just reuse the same buffer, or at least we can reuse in/weight for output
-        tmp_alloc = Allocator()
+        tmp_alloc = LinearAllocator()
         tmp_input = tmp_alloc.alloc(piece_input.size_bytes)
         tmp_weight = tmp_alloc.alloc(piece_weight.size_bytes)
         tmp_output = tmp_alloc.alloc(piece_output.size_bytes)
@@ -262,16 +252,31 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
             state.push_operation(core, OperationLockWait(state.get_cn_lock(prev), 1))
         state.push_cycles(core, "end", "wait")
 
-        # copy inputs
         start_l1 = Pointer(f"L1_START_C{core}", MemoryKind.L1)
         start_l2 = Pointer(f"L2_START_C{core}", MemoryKind.L2)
 
+        # fabric operations
+        fabric_in_start = state.new_lock()
+        fabric_in_done = state.new_lock()
+        fabric_out_start = state.new_lock()
+        fabric_out_done = state.new_lock()
+
+        state.push_operation(None, OperationLockWait(fabric_in_start, 1))
+        state.push_copy_tensor(None, input.pointer_l3, start_l2.offset(tmp_input), piece_input, True)
+        state.push_copy_tensor(None, weight.pointer_l3, start_l2.offset(tmp_weight), piece_weight, True)
+        state.push_operation(None, OperationLockIncrement(fabric_in_done))
+        state.push_operation(None, OperationPad())
+
+        state.push_operation(None, OperationLockWait(fabric_out_start, 1))
+        state.push_copy_tensor(None, output.pointer_l3, start_l2.offset(tmp_output), piece_output, False)
+        state.push_operation(None, OperationLockIncrement(fabric_out_done))
+        state.push_operation(None, OperationPad())
+
+        # copy inputs
         state.push_cycles(core, "start", "input")
-
-        state.push_copy_tensor(core, input.pointer_l3, start_l2.offset(tmp_input), piece_input, True)
+        state.push_operation(core, OperationLockIncrement(fabric_in_start))
+        state.push_operation(core, OperationLockWait(fabric_in_done, 1))
         state.push_copy(core, start_l1.offset(tmp_input), start_l2.offset(tmp_input), piece_input.size_bytes)
-
-        state.push_copy_tensor(core, weight.pointer_l3, start_l2.offset(tmp_weight), piece_weight, True)
         state.push_copy(core, start_l1.offset(tmp_weight), start_l2.offset(tmp_weight), piece_weight.size_bytes)
         state.push_cycles(core, "end", "input")
 
@@ -285,10 +290,11 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
         state.push_cycles(core, "end", "calc")
 
         # copy output
+        # TODO wait until ALL sub-CNs are done for split input?
         state.push_cycles(core, "start", "output")
         state.push_copy(core, start_l2.offset(tmp_output), start_l1.offset(tmp_output), piece_output.size_bytes)
-        state.push_copy_tensor(core, output.pointer_l3, start_l2.offset(tmp_output), piece_output, False)
-
+        state.push_operation(core, OperationLockIncrement(fabric_out_start))
+        state.push_operation(core, OperationLockWait(fabric_out_done, 1))
         state.push_operation(core, OperationLockIncrement(state.get_cn_lock(cn)))
         state.push_cycles(core, "end", "output")
 
@@ -302,6 +308,7 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
 
 
 def generate_meta(f, state: State):
+    # TODO remove this ram store, it's only used on the fabric controller which gets it anyway
     f.writeln("static struct pi_device *ram = NULL;")
     f.writeln(f"static volatile u32 LOCKS[{state.next_lock}] = {{}};")
     f.writeln(f"static u32 CYCLES[{len(state.cycle_infos)}] = {{}};")
@@ -392,6 +399,15 @@ def generate_func_final(f, state: State):
     f.writeln("}")
 
 
+# TODO ensure fabric operations are in a good order (topologically sorted?)
+def generate_func_fabric(f, state: State):
+    f.writeln(f"void generated_fabric(struct pi_device *ram_param) {{")
+    with f:
+        for op in state.operations_fabric:
+            op.generate_code(f, state)
+    f.writeln("}")
+
+
 def generate_func_core(f, state: State, core):
     f.writeln(f"void generated_core_{core}() {{")
     with f:
@@ -401,8 +417,8 @@ def generate_func_core(f, state: State, core):
 
 
 def generate_data(f, state: State, d_bin):
-    alloc_l3_const = Allocator()
-    alloc_l3_dyn = Allocator()
+    alloc_l3_const = LinearAllocator()
+    alloc_l3_dyn = LinearAllocator()
 
     for name, buffer in state.buffers.items():
         upper = name_to_c_upper(name)
@@ -479,6 +495,9 @@ def generate_code(state: State, project_path):
         generate_func_final(f, state)
         f.writeln()
 
+        generate_func_fabric(f, state)
+        f.writeln()
+
         for core in range(len(state.operations_per_core)):
             generate_func_core(f, state, core)
             f.writeln()
@@ -486,7 +505,8 @@ def generate_code(state: State, project_path):
         generate_core_dispatch(f, len(state.operations_per_core))
 
 
-def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, project_path, simulate: bool, run: bool, plot: bool):
+def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, project_path, simulate: bool, run: bool,
+                    plot: bool):
     print("Collecting workload")
 
     assert onnx_path.endswith(".onnx")
@@ -566,4 +586,4 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
         result.check_returncode()
 
         if plot:
-            plot_profile(stdout, block=False)
+            plot_profile(stdout, "outputs/profile.png", block=False)

@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 pattern_profile = re.compile(r"^== profile == (\d+) == ([^=]+) == ([^=]+) == ([^=]+)$")
 
 
-def plot_profile(stdout: str, block: bool = True):
+def plot_profile(stdout: str, output_path: str, block: bool = True):
     core_slices = {}
     key_last_time = {}
     names = dict()  # deterministic set
@@ -60,16 +60,22 @@ def plot_profile(stdout: str, block: bool = True):
         ax.legend(handles=[matplotlib.patches.Patch(color=name_colors[name], label=name) for name in used_names])
 
     # fig.tight_layout()
-    plt.savefig("outputs/profile.png")
+    plt.savefig(output_path)
     plt.show(block=block)
 
 
 def main():
     # path = r"\\wsl.localhost\Ubuntu\home\karel\new-attempt\pulp-sdk\applications\custom\output.txt"
-    path = "../stream/outputs/stdout.txt"
+
+    # path = "../stream/outputs/stdout.txt"
+    # output_path = "../stream/outputs/profile.png"
+
+    path = r"\\wsl.localhost\Ubuntu\home\karel\new-attempt\pulp-sdk\applications\custom\log.txt"
+    output_path = "profile.png"
+
     with open(path, "r") as f:
         data = f.read()
-    plot_profile(data)
+    plot_profile(data, output_path)
 
 
 if __name__ == '__main__':

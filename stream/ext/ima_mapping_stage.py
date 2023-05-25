@@ -80,6 +80,7 @@ class ImaCostModelEvaluation(CostModelEvaluation):
         k = round(k)
         c = round(c)
 
+        # TODO assert there is no k,c axes in temporal mapping (to ensure we don't need to rewrite the weights)
         b = self.temporal_mapping.total_cycle
 
         factor = job_b_factor[f"{k}x{c}"]
