@@ -249,7 +249,7 @@ class Tensor:
 
     @property
     def size_bytes(self) -> int:
-        return map_int(self.size_elem)
+        return map_int(self.size_elem * self.dtype.size_bytes)
 
     def shape_bytes(self, axis: int) -> int:
         return map_int(self.shape[axis] * self.dtype.size_bytes)
@@ -279,7 +279,7 @@ class Tensor:
                 stop = s.stop if s.stop is not None else self.shape[i]
 
                 assert s.step is None
-                assert 0 <= start <= stop <= self.shape[i]
+                assert 0 <= start <= stop <= self.shape[i], f"Failed to slice {self} with {item}"
 
                 new_offset_elem += self.strides_elem[i] * start
                 new_strides_elem.append(self.strides_elem[i])
@@ -295,37 +295,41 @@ def map_int(f: float) -> int:
     return int(f)
 
 
+# TODO rename to L3Buffer?
 @dataclass
 class Buffer:
-    shape: tuple
     dtype: DataType
-    const: bool
 
-    # whether the buffer is stored transposed in device memory
-    transposed: bool
+    data_shape: Tuple[int]
+    padding: Tuple[Tuple[int, int]]
 
-    pointer_l3: Optional[Pointer]
-
+    pointer_l3: Pointer
     pointer_l3_expected: Optional[Pointer] = None
-    sim_value: Optional[np.array] = None
+
+    const: bool = False
+    input: bool = False
+
+    inner_simulated: Optional[np.array] = None
 
     def __post_init__(self):
-        if self.transposed:
-            assert len(self.shape) == 2
+        assert len(self.data_shape) == len(self.padding)
 
     @property
-    def size_bytes(self):
-        return map_int(math.prod(self.shape) * self.dtype.size_bytes)
+    def has_padding(self):
+        return any(start != 0 or end != 0 for (start, end) in self.padding)
 
-    def tensor(self) -> Tensor:
-        # TODO is this right?
-        simple = Tensor.simple(self.dtype, self.shape)
-        return simple
+    @property
+    def padded_tensor(self):
+        padded_shape = tuple([start + size + end for size, (start, end) in zip(self.data_shape, self.padding)])
+        return Tensor.simple(self.dtype, padded_shape)
 
-        # if self.transposed:
-        #     return simple.transpose(0, 1)
-        # else:
-        #     return simple
+    @property
+    def slices(self):
+        return [slice(start, start + size) for size, (start, _) in zip(self.data_shape, self.padding)]
+
+    @property
+    def inner_tensor(self):
+        return self.padded_tensor[*self.slices]
 
 
 def simple_strides(shape):

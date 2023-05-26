@@ -45,9 +45,14 @@ class Output:
         self.indent = self.indent[:-4]
 
 
+EQUATION_MATMUL = 'O[b][k]+=A[b][c]*B[c][k]'
+EQUATION_CONV = 'O[b][g][k][oy][ox]+=W[k][c][fy][fx]*I[b][g][c][iy][ix]'
+
+
 class State:
-    def __init__(self, onnx_model: ModelProto, core_count: int, simulate: bool):
+    def __init__(self, onnx_model: ModelProto, workload: DiGraph, core_count: int, simulate: bool):
         self.onnx_model = onnx_model
+        self.workload = workload
         self.simulate = simulate
 
         self.buffers: Dict[str, Buffer] = {}
@@ -67,17 +72,30 @@ class State:
         # define inputs and constants
         for input in onnx_model.graph.input:
             shape = tuple(d.dim_value for d in list(input.type.tensor_type.shape.dim))
-            buffer = self.define_buffer(input.name, shape, DataType.Int8, const=True, transposed=False)
+            buffer = self.define_buffer(input.name, shape, DataType.Int8, const=True)
 
             buffer.input = True
-            buffer.sim_value = random_ima_input(shape)
-        for const in onnx_model.graph.initializer:
-            shape = tuple(const.dims)
-            transposed = len(shape) == 2
-            buffer = self.define_buffer(const.name, shape, DataType.Int4, const=True, transposed=transposed)
+            buffer.inner_simulated = random_ima_input(shape)
 
-            buffer.constant = True
-            buffer.sim_value = random_ima_weight(shape)
+        for const in onnx_model.graph.initializer:
+            onnx_shape = tuple(const.dims)
+
+            # weights are stored with the K/output axis last
+            if len(onnx_shape) == 1:
+                # skip biases for now
+                continue
+            if len(onnx_shape) == 2:
+                k, c = onnx_shape
+                shape = c, k
+            elif len(onnx_shape) == 4:
+                k, c, h, w = onnx_shape
+                shape = h, w, c, k
+            else:
+                raise KeyError(f"Unexpected weight rank {len(onnx_shape)}")
+
+            buffer = self.define_buffer(const.name, shape, DataType.Int4, const=True)
+            buffer.const = True
+            buffer.inner_simulated = random_ima_weight(shape)
 
     def get_buffer(self, name):
         return self.buffers[name]
@@ -89,7 +107,7 @@ class State:
     def define_buffer(
             self,
             name, shape: tuple, dtype: DataType,
-            const: bool, transposed: bool,
+            const: bool,
             allow_existing: bool = False
     ) -> Buffer:
         if name in self.buffers:
@@ -98,6 +116,7 @@ class State:
                 return self.buffers[name]
 
             raise KeyError(f"Buffer {name} already defined")
+
         upper = name_to_c_upper(name)
 
         if const:
@@ -105,9 +124,25 @@ class State:
         else:
             pointer_l3 = Pointer(f"(L3_DYN_START + L3_DYN_OFFSET_{upper})", MemoryKind.L3)
 
+        # pad if used as conv input
+        used_as_conv_input = False
+        for cn in self.workload:
+            if cn.equation == EQUATION_CONV:
+                if cn.input_names[0] == name:
+                    used_as_conv_input = True
+                    break
+
+        if used_as_conv_input:
+            assert len(shape) == 4, f"Conv input/output must be 4D, got shape {shape}"
+            padding = ((0, 0), (0, 0), (1, 1), (1, 1))
+        else:
+            padding = tuple([(0, 0)] * len(shape))
+
         buffer = Buffer(
-            shape=shape, dtype=dtype, const=const, transposed=transposed,
-            pointer_l3=pointer_l3
+            dtype=dtype,
+            data_shape=shape,
+            padding=padding,
+            pointer_l3=pointer_l3,
         )
         self.buffers[name] = buffer
         return buffer
@@ -134,6 +169,7 @@ class State:
 
     def push_copy_tensor(self, core: Optional[int], upper: Pointer, lower: Pointer, tensor: Tensor, down: bool):
         # TODO generalize to other ranks
+        # TODO use Copy1D if possible?
         assert tensor.rank == 2, f"Can only copy 2D tensors for now, got {tensor}"
 
         op = OperationCopy2D(
@@ -216,16 +252,16 @@ def visit_matmul(core: int, workload, cn: ComputationNode, orig_cn: ComputationN
     # get full output buffer
     output = state.define_buffer(
         output_name, (b_full, k_full), dtype=DataType.Int8,
-        const=False, transposed=False,
+        const=False,
         allow_existing=True
     )
 
-    full_input = input.tensor()
-    full_weight = weight.tensor()
-    full_output = output.tensor()
+    full_input = input.inner_tensor
+    full_weight = weight.inner_tensor
+    full_output = output.inner_tensor
 
     piece_input = full_input[b_start:b_end, c_start:c_end]
-    piece_weight = full_weight[k_start:k_end, c_start:c_end]
+    piece_weight = full_weight[c_start:c_end, k_start:k_end]  # weight is stored transposed
     piece_output = full_output[b_start:b_end, k_start:k_end]
 
     # allocate temporary buffers
@@ -295,17 +331,19 @@ def visit_matmul(core: int, workload, cn: ComputationNode, orig_cn: ComputationN
 
     state.push_operation(core, OperationPad())
 
-    if state.simulate:
-        assert weight.transposed
-        output.sim_value = ima_matmul(input.sim_value, weight.sim_value)
+    # simulate if required and not already simulated
+    if state.simulate and output.inner_simulated is None:
+        output.inner_simulated = ima_matmul(input.inner_simulated, weight.inner_simulated.transpose())
 
 
 def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvaluation):
     core = cn.get_core_allocation()
     orig_cn = cn.original_node if cn.original_node is not None else cn
 
-    if cn.equation == 'O[b][k]+=A[b][c]*B[c][k]':
+    if cn.equation == EQUATION_MATMUL:
         visit_matmul(core, workload, cn, orig_cn, state)
+    # elif cn.equation == EQUATION_CONV:
+    # visit_conv(core, workload, cn, orig_cn, state)
     else:
         raise ValueError(f"Unrecognised equation {cn.equation}")
 
@@ -341,6 +379,9 @@ def generate_func_init(f, state: State):
             f.writeln("printf(\"ERROR: Failed to allocate L3_DYN\\n\");")
             f.writeln("return -2;")
         f.writeln("}")
+        f.writeln()
+        # clear ram to set padding and to make debugging easier
+        f.writeln("pi_ram_clear(ram_param, L3_DYN_START, L3_DYN_SIZE);")
         f.writeln()
 
         # TODO re-enable once we can get this synchronized
@@ -385,7 +426,7 @@ def generate_func_final(f, state: State):
         for name, buffer in state.buffers.items():
             if not buffer.const and buffer.pointer_l3_expected is not None:
                 f.writeln(
-                    f"verify_output(ram, {buffer.pointer_l3_expected}, {buffer.pointer_l3}, {buffer.size_bytes}, \"{name}\");")
+                    f"verify_output(ram, {buffer.pointer_l3_expected}, {buffer.pointer_l3}, {buffer.padded_tensor.size_bytes}, \"{name}\");")
 
         f.writeln()
 
@@ -426,8 +467,10 @@ def generate_data(f, state: State, d_bin):
     for name, buffer in state.buffers.items():
         upper = name_to_c_upper(name)
 
-        if buffer.sim_value is not None:
-            offset = alloc_l3_const.alloc(buffer.size_bytes)
+        if buffer.inner_simulated is not None:
+            assert buffer.inner_simulated.shape == buffer.inner_tensor.shape
+
+            offset = alloc_l3_const.alloc(buffer.padded_tensor.size_bytes)
             offset_name = f"L3_CONST_OFFSET_{upper}"
             f.writeln(f"#define {offset_name} {offset}")
 
@@ -437,20 +480,25 @@ def generate_data(f, state: State, d_bin):
             else:
                 buffer.pointer_l3_expected = pointer
 
-            if buffer.transposed:
-                value_flat = buffer.sim_value.transpose().flatten()
-            else:
-                value_flat = buffer.sim_value.flatten()
+            padded_value = np.zeros_like(buffer.inner_simulated, shape=buffer.padded_tensor.shape)
+            padded_value[*buffer.slices] = buffer.inner_simulated
 
-            value_bytes = array_to_bytes(value_flat, buffer.dtype)
-            assert len(value_bytes) == buffer.size_bytes
+            value_bytes = array_to_bytes(padded_value.flatten(), buffer.dtype)
+            assert len(value_bytes) == buffer.padded_tensor.size_bytes
             d_bin.write(value_bytes)
 
         if not buffer.const:
-            offset = alloc_l3_dyn.alloc(buffer.size_bytes)
+            offset = alloc_l3_dyn.alloc(buffer.padded_tensor.size_bytes)
             offset_name = f"L3_DYN_OFFSET_{upper}"
             # TODO split into offset and start again
             f.writeln(f"#define {offset_name} {offset}")
+
+        print(f"Buffer {upper}")
+        print(f"  shape: {buffer.data_shape}")
+        print(f"  padding: {buffer.padding}")
+        if buffer.inner_simulated is not None:
+            print(f"  values: {buffer.inner_simulated.tolist()}")
+            print(f"  bytes: [{', '.join(f'{x:#02x}' for x in value_bytes)}]")
 
     f.writeln()
 
@@ -522,7 +570,7 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
     cluster_cores = len(accelerator.cores) - 1
 
     np.random.seed(0)
-    state = State(onnx_model, cluster_cores, simulate=simulate)
+    state = State(onnx_model, workload, cluster_cores, simulate=simulate)
 
     nodes = sorted(workload, key=lambda node: node.start)
 
@@ -548,7 +596,7 @@ def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, projec
 
     print("Allocated buffers:")
     for name, buffer in state.buffers.items():
-        print(f"  {name}: {buffer.shape}")
+        print(f"  {name}: {buffer.padded_tensor} {buffer.inner_tensor}")
 
     print("Generating code")
     state.freeze_meta()
