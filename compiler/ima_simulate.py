@@ -1,6 +1,5 @@
+import matplotlib.pyplot as plt
 import numpy as np
-
-from compiler.codegen import array_to_str, DataType
 
 
 def ima_sum(input, weight, adc_low: int, adc_high: int):
@@ -46,7 +45,8 @@ def random_ima_weight(shape):
 
 
 def random_ima_input(shape):
-    return np.random.randint(-128, 127, shape)
+    return np.clip(np.random.standard_normal(shape) * 50, -126, 126).astype(int)
+    # return np.random.randint(-128, 127, shape)
 
 
 def ima_matmul(input, weight):
@@ -77,16 +77,16 @@ def main():
     y1 = ima_matmul(x, w1)
     y2 = ima_matmul(y1, w2)
 
-    with open("layer_weights.h", "w") as f:
-        print(f"#define LAYER_N {n}", file=f)
-        print(f"#define LAYER_SIZE {size}", file=f)
+    bins = np.linspace(-128, 128, 256)
 
-        print(f"#define DATA_I {array_to_str(x.flatten(), DataType.Int8)}", file=f)
-        print(f"#define DATA_W1 {array_to_str(w1.flatten(), DataType.Int4)}", file=f)
-        print(f"#define DATA_W2 {array_to_str(w2.flatten(), DataType.Int4)}", file=f)
-        print(f"#define DATA_O {array_to_str(y2.flatten(), DataType.Int8)}", file=f)
+    ax1 = plt.subplot(311)
+    plt.hist(x.flatten(), bins=bins)
+    ax2 = plt.subplot(312, sharex=ax1)
+    plt.hist(y1.flatten(), bins=bins)
+    _ = plt.subplot(313, sharex=ax2)
+    plt.hist(y2.flatten(), bins=bins)
 
-    print(y1)
+    plt.show()
 
 
 if __name__ == '__main__':
