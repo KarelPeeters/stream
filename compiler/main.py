@@ -692,9 +692,9 @@ def generate_data(f, state: State, d_bin):
         print(f"Buffer {upper}")
         print(f"  inner_shape: {buffer.inner_shape}")
         print(f"  padding: {buffer.padding}")
-        if buffer.inner_simulated is not None:
-            print(f"  values: {buffer.inner_simulated.tolist()}")
-            print(f"  bytes: [{', '.join(f'{x:#02x}' for x in value_bytes)}]")
+        # if buffer.inner_simulated is not None:
+        #     print(f"  values: {buffer.inner_simulated.tolist()}")
+        #     print(f"  bytes: [{', '.join(f'{x:#02x}' for x in value_bytes)}]")
 
     f.writeln()
 
