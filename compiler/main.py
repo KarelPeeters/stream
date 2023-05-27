@@ -10,10 +10,10 @@ from zigzag.classes.cost_model.cost_model import CostModelEvaluation
 
 from compiler.allocator import LinearAllocator
 from compiler.codegen import DataType, array_to_bytes
-from compiler.ima_simulate import random_ima_input, random_ima_weight, ima_matmul
+from compiler.ima_simulate import random_ima_input, random_ima_weight, ima_matmul, ima_conv
 from compiler.operation import Operation, MemoryKind, Pointer, Lock, Profile, Cycles, OperationCopy, OperationMatmul, \
     Buffer, OperationPad, CyclesInfo, ProfileInfo, OperationRecordCycles, OperationLockIncrement, OperationLockWait, \
-    OperationCopy2D, Tensor, OperationComment
+    OperationCopy2D, Tensor, OperationComment, OperationConvPadded, OperationCopy3D
 from compiler.plot_profile import plot_profile
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.workload.computation_node import ComputationNode
@@ -89,7 +89,7 @@ class State:
                 shape = c, k
             elif len(onnx_shape) == 4:
                 k, c, h, w = onnx_shape
-                shape = h, w, c, k
+                shape = c, h, w, k
             else:
                 raise KeyError(f"Unexpected weight rank {len(onnx_shape)}")
 
@@ -125,14 +125,14 @@ class State:
             pointer_l3 = Pointer(f"(L3_DYN_START + L3_DYN_OFFSET_{upper})", MemoryKind.L3)
 
         # pad if used as conv input
-        used_as_conv_input = False
+        used_as_conv_io = False
         for cn in self.workload:
             if cn.equation == EQUATION_CONV:
-                if cn.input_names[0] == name:
-                    used_as_conv_input = True
+                if cn.input_names[0] == name or cn.output_names[0] == name:
+                    used_as_conv_io = True
                     break
 
-        if used_as_conv_input:
+        if used_as_conv_io:
             assert len(shape) == 4, f"Conv input/output must be 4D, got shape {shape}"
             padding = ((0, 0), (0, 0), (1, 1), (1, 1))
         else:
@@ -167,20 +167,50 @@ class State:
         op = OperationCopy(dest=dest, src=src, size_bytes=size_bytes)
         self.push_operation(core, op)
 
+    # tensor is only the upper tensor, the lower tensor has the same shape but has simple strides and no offset
     def push_copy_tensor(self, core: Optional[int], upper: Pointer, lower: Pointer, tensor: Tensor, down: bool):
-        # TODO generalize to other ranks
-        # TODO use Copy1D if possible?
-        assert tensor.rank == 2, f"Can only copy 2D tensors for now, got {tensor}"
+        tensor = tensor.simplify_for_copy()
+        upper_offset = upper.offset(tensor.offset_bytes)
 
-        op = OperationCopy2D(
-            upper.offset(tensor.offset_bytes),
-            lower,
-            down,
-            tensor.size_bytes,
-            tensor.stride_bytes(0),
-            tensor.shape_bytes(1),
-        )
-        self.push_operation(core, op)
+        # TODO we could reorder the dims so that the last dim is contiguous
+        #   to allow some more tensor types to be copied
+
+        if tensor.rank == 1:
+            assert tensor.strides_elem[-1] == 1
+
+            if down:
+                dest, src = lower, upper_offset
+            else:
+                dest, src = upper_offset, lower
+
+            self.push_operation(core, OperationCopy(dest, src, tensor.size_bytes))
+        elif tensor.rank == 2:
+            assert tensor.strides_elem[-1] == 1
+
+            self.push_operation(core, OperationCopy2D(
+                upper_offset,
+                lower,
+                down,
+                tensor.size_bytes,
+                tensor.stride_bytes(0),
+                tensor.shape_bytes(1),
+            ))
+        elif tensor.rank == 3:
+            assert tensor.strides_elem[2] == 1
+
+            self.push_operation(core, OperationCopy3D(
+                upper_offset,
+                lower,
+                down,
+                size_0=tensor.shape_bytes(0),
+                size_1=tensor.shape_bytes(1),
+                size_2=tensor.shape_bytes(2),
+                stride_0=tensor.stride_bytes(0),
+                stride_1=tensor.stride_bytes(1),
+            ))
+
+        else:
+            raise NotImplementedError(f"Copy for tensor rank {tensor.rank}")
 
     # TODO reduce code duplication here
     def new_lock(self) -> Lock:
@@ -333,7 +363,146 @@ def visit_matmul(core: int, workload, cn: ComputationNode, orig_cn: ComputationN
 
     # simulate if required and not already simulated
     if state.simulate and output.inner_simulated is None:
-        output.inner_simulated = ima_matmul(input.inner_simulated, weight.inner_simulated.transpose())
+        # (c, k) -> (k, c)
+        weight_trans = weight.inner_simulated.transpose([1, 0])
+        output.inner_simulated = ima_matmul(input.inner_simulated, weight_trans)
+
+
+# TODO unify with matmul codegen
+def visit_conv(core: int, workload, cn: ComputationNode, orig_cn: ComputationNode, state: State):
+    # get inputs
+    # TODO include bias
+    input_name, weight_name, _ = cn.input_names
+    output_name, = cn.output_names
+
+    input = state.get_buffer(input_name)
+    weight = state.get_buffer(weight_name)
+
+    # figure out ranges
+    for node in [orig_cn, cn]:
+        expected_keys = {'B', 'K', 'G', 'OX', 'OY', 'C', 'FX', 'FY', 'IX', 'IY'}
+        assert node.loop_ranges.keys() == expected_keys, orig_cn.loop_ranges.keys()
+        assert cn.loop_ranges['G'] == (0, 1)
+        assert cn.loop_ranges['FX'] == (0, 3)
+        assert cn.loop_ranges['FY'] == (0, 3)
+
+    (b_start, b_end) = cn.loop_ranges["B"]
+    (k_start, k_end) = cn.loop_ranges["K"]
+    (c_start, c_end) = cn.loop_ranges["C"]
+    (oy_start, oy_end) = cn.loop_ranges["OY"]
+    (ox_start, ox_end) = cn.loop_ranges["OX"]
+    (iy_start, iy_end) = cn.loop_ranges["IY"]
+    (ix_start, ix_end) = cn.loop_ranges["IX"]
+
+    (b_zero, b_full) = orig_cn.loop_ranges["B"]
+    (k_zero, k_full) = orig_cn.loop_ranges["K"]
+    (c_zero, c_full) = orig_cn.loop_ranges["C"]
+    (oy_zero, oy_full) = orig_cn.loop_ranges["OY"]
+    (ox_zero, ox_full) = orig_cn.loop_ranges["OX"]
+    (iy_zero, iy_full) = orig_cn.loop_ranges["IY"]
+    (ix_zero, ix_full) = orig_cn.loop_ranges["IX"]
+
+    assert all(v == 0 for v in [b_zero, k_zero, c_zero, ox_zero, oy_zero])
+    assert iy_zero == -1 and ix_zero == -1
+    assert iy_start == oy_start - 1
+    assert ix_start == ox_start - 1
+    assert iy_full == oy_full + 1
+    assert ix_full == ox_full + 1
+
+    for node in [orig_cn, cn]:
+        assert node.loop_ranges['IX'] == (-1, ox_end + 1)
+        assert node.loop_ranges['IY'] == (-1, oy_end + 1)
+
+    comment = f"conv b={b_start}..{b_end}, k={k_start}..{k_end}, c={c_start}..{c_end} ox={ox_start}..{ox_end} oy={oy_start}..{oy_end}"
+    state.push_operation(core, OperationComment(comment))
+
+    # get full output buffer
+    output = state.define_buffer(
+        output_name, (b_full, k_full, oy_full, ox_full), dtype=DataType.Int8,
+        const=False,
+        allow_existing=True
+    )
+
+    full_input = input.padded_tensor
+    full_weight = weight.padded_tensor
+    full_output = output.inner_tensor
+
+    piece_input = full_input[b_start:b_end, c_start:c_end, 1 + iy_start:1 + iy_end, 1 + ix_start:1 + ix_end]
+    piece_weight = full_weight[c_start:c_end, :, :, k_start:k_end]  # stores with K at the end
+    piece_output = full_output[b_start:b_end, k_start:k_end, oy_start:oy_end, ox_start:ox_end]
+
+    # allocate temporary buffers
+    tmp_alloc = LinearAllocator()
+    tmp_input = tmp_alloc.alloc(piece_input.size_bytes)
+    tmp_weight = tmp_alloc.alloc(piece_weight.size_bytes)
+    tmp_output = tmp_alloc.alloc(piece_output.size_bytes)
+
+    # allocate space for temporary buffers in L1 and L2
+    state.tmp_size_per_core[core] = max(len(tmp_alloc), state.tmp_size_per_core[core])
+
+    # wait for dependencies (this automatically handles the split input case)
+    state.push_cycles(core, "start", "wait")
+    for (prev, _) in workload.in_edges(cn):
+        state.push_operation(core, OperationLockWait(state.get_cn_lock(prev), 1))
+    state.push_cycles(core, "end", "wait")
+
+    start_l1 = Pointer(f"L1_START_C{core}", MemoryKind.L1)
+    start_l2 = Pointer(f"L2_START_C{core}", MemoryKind.L2)
+
+    # fabric operations
+    fabric_in_start = state.new_lock()
+    fabric_in_done = state.new_lock()
+    fabric_out_start = state.new_lock()
+    fabric_out_done = state.new_lock()
+
+    state.push_operation(None, OperationLockWait(fabric_in_start, 1))
+    state.push_cycles(None, "start", "down")
+    state.push_copy_tensor(None, input.pointer_l3, start_l2.offset(tmp_input), piece_input, True)
+    state.push_copy_tensor(None, weight.pointer_l3, start_l2.offset(tmp_weight), piece_weight, True)
+    state.push_operation(None, OperationLockIncrement(fabric_in_done))
+    state.push_cycles(None, "end", "down")
+    state.push_operation(None, OperationPad())
+
+    state.push_operation(None, OperationLockWait(fabric_out_start, 1))
+    state.push_cycles(None, "start", "up")
+    state.push_copy_tensor(None, output.pointer_l3, start_l2.offset(tmp_output), piece_output, False)
+    state.push_operation(None, OperationLockIncrement(fabric_out_done))
+    state.push_cycles(None, "end", "up")
+    state.push_operation(None, OperationPad())
+
+    # copy inputs
+    state.push_cycles(core, "start", "input")
+    state.push_operation(core, OperationLockIncrement(fabric_in_start))
+    state.push_operation(core, OperationLockWait(fabric_in_done, 1))
+    state.push_copy(core, start_l1.offset(tmp_input), start_l2.offset(tmp_input), piece_input.size_bytes)
+    state.push_copy(core, start_l1.offset(tmp_weight), start_l2.offset(tmp_weight), piece_weight.size_bytes)
+    state.push_cycles(core, "end", "input")
+
+    # real operation
+    state.push_cycles(core, "start", "calc")
+    state.push_operation(core, OperationConvPadded(
+        b=(b_end - b_start), k=(k_end - k_start), c=(c_end - c_start),
+        oh=(oy_end - oy_start), ow=(ox_end - ox_start),
+        fh=3, fw=3,
+        weight=start_l1.offset(tmp_weight), input=start_l1.offset(tmp_input), output=start_l1.offset(tmp_output),
+        profile=state.new_profile(ProfileInfo(core=f"ima_core_{core}", name="conv")),
+    ))
+    state.push_cycles(core, "end", "calc")
+
+    # copy output
+    state.push_cycles(core, "start", "output")
+    state.push_copy(core, start_l2.offset(tmp_output), start_l1.offset(tmp_output), piece_output.size_bytes)
+    state.push_operation(core, OperationLockIncrement(fabric_out_start))
+    state.push_operation(core, OperationLockWait(fabric_out_done, 1))
+    state.push_operation(core, OperationLockIncrement(state.get_cn_lock(cn)))
+    state.push_cycles(core, "end", "output")
+
+    state.push_operation(core, OperationPad())
+
+    if state.simulate and output.inner_simulated is None:
+        # (c h w k) -> (k c h w)
+        weight_trans = weight.inner_simulated.transpose([3, 0, 1, 2])
+        output.inner_simulated = ima_conv(input.inner_simulated, weight_trans)
 
 
 def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvaluation):
@@ -342,8 +511,8 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
 
     if cn.equation == EQUATION_MATMUL:
         visit_matmul(core, workload, cn, orig_cn, state)
-    # elif cn.equation == EQUATION_CONV:
-    # visit_conv(core, workload, cn, orig_cn, state)
+    elif cn.equation == EQUATION_CONV:
+        visit_conv(core, workload, cn, orig_cn, state)
     else:
         raise ValueError(f"Unrecognised equation {cn.equation}")
 
@@ -448,15 +617,15 @@ def generate_func_fabric(f, state: State):
     f.writeln(f"void generated_fabric(struct pi_device *ram_param) {{")
     with f:
         for op in state.operations_fabric:
-            op.generate_code(f, state)
+            op.generate_code(None, f)
     f.writeln("}")
 
 
 def generate_func_core(f, state: State, core):
     f.writeln(f"void generated_core_{core}() {{")
     with f:
-        for operation in state.operations_per_core[core]:
-            operation.generate_code(f, state)
+        for op in state.operations_per_core[core]:
+            op.generate_code(core, f)
     f.writeln("}")
 
 

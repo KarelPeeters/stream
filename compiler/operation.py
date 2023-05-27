@@ -11,7 +11,7 @@ from compiler.codegen import DataType
 
 class Operation(ABC):
     @abstractmethod
-    def generate_code(self, f, state):
+    def generate_code(self, core: Optional[int], f):
         raise NotImplementedError()
 
 
@@ -91,14 +91,16 @@ class OperationCopy(Operation):
     src: Pointer
     size_bytes: int
 
-    def generate_code(self, f, state):
+    def generate_code(self, core: Optional[int], f):
         kinds = (self.dest.kind, self.src.kind)
 
         if kinds == (MemoryKind.L2, MemoryKind.L3):
-            f.writeln(f"pi_cl_ram_copy_blocking(ram, {self.src}, {self.dest}, {self.size_bytes}, 1);")
+            assert core is None
+            f.writeln(f"pi_ram_copy(ram, {self.src}, {self.dest}, {self.size_bytes}, 1);")
             return
         if kinds == (MemoryKind.L3, MemoryKind.L2):
-            f.writeln(f"pi_cl_ram_copy_blocking(ram, {self.dest}, {self.src}, {self.size_bytes}, 0);")
+            assert core is None
+            f.writeln(f"pi_ram_copy(ram, {self.dest}, {self.src}, {self.size_bytes}, 0);")
             return
 
         if kinds == (MemoryKind.L1, MemoryKind.L2):
@@ -128,21 +130,33 @@ class OperationCopy2D(Operation):
     stride_bytes: int
     length_bytes: int
 
-    def generate_code(self, f, state):
+    def generate_code(self, core: Optional[int], f):
         assert self.upper.kind == MemoryKind.L3 and self.lower.kind == MemoryKind.L2
+        assert core is None
 
-        # TODO switch back to 1D copies if applicable
-        # if self.length_bytes == self.stride_bytes or self.size_bytes == self.length_bytes:
-        #     if self.dir_down:
-        #         op = OperationCopy(self.lower, self.upper, self.size_bytes)
-        #     else:
-        #         op = OperationCopy(self.upper, self.lower, self.size_bytes)
-        #     op.generate_code(f, state)
-        #     return
-
-        # TODO assert that we are on the fabric controller
         f.writeln(
             f"pi_ram_copy_2d(ram, {self.upper}, {self.lower}, {self.size_bytes}, {self.stride_bytes}, {self.length_bytes}, {int(self.dir_down)});")
+
+
+@dataclass
+class OperationCopy3D(Operation):
+    upper: Pointer
+    lower: Pointer
+    dir_down: bool
+
+    size_0: int
+    size_1: int
+    size_2: int
+    stride_0: int
+    stride_1: int
+
+    def generate_code(self, core: Optional[int], f):
+        assert self.upper.kind == MemoryKind.L3 and self.lower.kind == MemoryKind.L2
+        assert core is None
+
+        shape_str = f".size_0 = {self.size_0}, .size_1 = {self.size_1}, .size_2 = {self.size_2}, .stride_0 = {self.stride_0}, .stride_1 = {self.stride_1}"
+        f.writeln(
+            f"pi_ram_copy_3d(ram, {self.upper}, {self.lower}, (ShapeCopy3D_t){{{shape_str}}}, {int(self.dir_down)});")
 
 
 @dataclass
@@ -157,11 +171,38 @@ class OperationMatmul(Operation):
 
     profile: Profile
 
-    def generate_code(self, f, state):
+    def generate_code(self, core: Optional[int], f):
         assert self.b != 1, "Matmul does not work for b=1"
         f.writeln(
             f"run_matmul("
             f"{self.b}, {self.k}, {self.c}, "
+            f"{self.weight}, {self.input}, {self.output}, "
+            f"&{self.profile}"
+            f");"
+        )
+
+
+@dataclass
+class OperationConvPadded(Operation):
+    b: int
+    k: int
+    c: int
+    oh: int
+    ow: int
+    fh: int
+    fw: int
+
+    input: Pointer
+    weight: Pointer
+    output: Pointer
+
+    profile: Profile
+
+    def generate_code(self, core: Optional[int], f):
+        # TODO some assert for conv param limitations?
+        f.writeln(
+            f"run_conv("
+            f"{self.b}, {self.k}, {self.c}, {self.oh}, {self.ow}, {self.fh}, {self.fw}, "
             f"{self.weight}, {self.input}, {self.output}, "
             f"&{self.profile}"
             f");"
@@ -173,7 +214,7 @@ class OperationMatmul(Operation):
 class OperationLockIncrement(Operation):
     lock: Lock
 
-    def generate_code(self, f, state):
+    def generate_code(self, core: Optional[int], f):
         f.writeln(f"{self.lock}++;")
 
 
@@ -182,7 +223,7 @@ class OperationLockWait(Operation):
     lock: Lock
     value: int
 
-    def generate_code(self, f, state):
+    def generate_code(self, core: Optional[int], f):
         f.writeln(f"while({self.lock} < {self.value});")
 
 
@@ -190,13 +231,13 @@ class OperationLockWait(Operation):
 class OperationRecordCycles(Operation):
     cycles: Cycles
 
-    def generate_code(self, f, state):
+    def generate_code(self, core: Optional[int], f):
         f.writeln(f"{self.cycles} = cycles(); // {self.cycles.info}")
 
 
 @dataclass
 class OperationPad(Operation):
-    def generate_code(self, f, state):
+    def generate_code(self, core: Optional[int], f):
         f.writeln()
 
 
@@ -204,7 +245,7 @@ class OperationPad(Operation):
 class OperationComment(Operation):
     text: str
 
-    def generate_code(self, f, state):
+    def generate_code(self, core: Optional[int], f):
         for line in self.text.splitlines():
             f.writeln(f"// {line}")
 
@@ -289,6 +330,55 @@ class Tensor:
 
         return Tensor(self.dtype, tuple(new_shape), new_offset_elem, tuple(new_strides_elem))
 
+    def remove_unit_dims(self) -> 'Tensor':
+        left_shape = []
+        left_strides = []
+
+        for (s, d) in zip(self.shape, self.strides_elem):
+            if s > 1:
+                left_shape.append(s)
+                left_strides.append(d)
+
+        return Tensor(self.dtype, tuple(left_shape), self.offset_elem, tuple(left_strides))
+
+    def combine_adjacent_dims(self) -> 'Tensor':
+        if self.rank <= 1:
+            return self
+
+        rev_shape = []
+        rev_strides_elem = []
+
+        next_size = self.shape[-1]
+        next_stride = self.strides_elem[-1]
+
+        for dim in reversed(range(0, self.rank - 1)):
+            curr_size = self.shape[dim]
+            curr_stride = self.strides_elem[dim]
+
+            if curr_stride == next_size * next_stride:
+                # merge
+                next_size *= curr_size
+                # next_stride stays the same
+            else:
+                # push
+                rev_shape.append(next_size)
+                rev_strides_elem.append(next_stride)
+                next_size = curr_size
+                next_stride = curr_stride
+
+        # push final
+        rev_shape.append(next_size)
+        rev_strides_elem.append(next_stride)
+
+        # reverse
+        shape = tuple(reversed(rev_shape))
+        strides_elem = tuple(reversed(rev_strides_elem))
+
+        return Tensor(dtype=self.dtype, shape=tuple(shape), offset_elem=self.offset_elem, strides_elem=strides_elem)
+
+    def simplify_for_copy(self):
+        return self.remove_unit_dims().combine_adjacent_dims()
+
 
 def map_int(f: float) -> int:
     assert float(int(f)) == f, f"Cannot map {f} to int"
@@ -342,13 +432,19 @@ def simple_strides(shape):
 
 
 def main():
-    tensor = Tensor.simple(DataType.Int8, (256, 32))
-    print(tensor)
+    # tensor = Tensor.simple(DataType.Int8, (256, 32))
+    # print(tensor)
+    #
+    # print(tensor[:, :])
+    # print(tensor[:, :16])
+    # print(tensor[:16, :])
+    # print(tensor[4, :16])
 
-    print(tensor[:, :])
-    print(tensor[:, :16])
-    print(tensor[:16, :])
-    print(tensor[4, :16])
+    # tensor = Tensor(DataType.Int8, (4, 16, 64, 64), 0, (16 * 64 * 64, 64 * 64, 64, 1))
+    # print(tensor)
+    # print(tensor.simplify_for_copy())
+
+    padded = Tensor.simple(DataType.Int8, (1, 16, 64 + 2, 64 + 2))
 
 
 if __name__ == '__main__':
