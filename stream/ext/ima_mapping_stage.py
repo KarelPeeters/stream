@@ -76,11 +76,9 @@ class ImaCostModelEvaluation(CostModelEvaluation):
         for operand, values in self.mapping.temporal_mapping.mapping_dic_origin.items():
             total_sizes = {}
 
-            # TODO what does this second list mean?
-            assert len(values) == 2 and len(values[1]) == 0
-            values = values[0]
-
-            for dim, size in values:
+            # TODO does the flattening make sense? we're losing the memory hierarchy info here
+            values_flat = [v for sub_values in values for v in sub_values]
+            for dim, size in values_flat:
                 assert int(size) == size
                 size = int(size)
 
