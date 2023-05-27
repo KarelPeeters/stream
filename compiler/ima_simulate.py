@@ -62,6 +62,31 @@ def ima_matmul(input, weight):
     return output
 
 
+def ima_conv(input, weight):
+    (b, c1, ih, iw) = input.shape
+    (k, c, fh, fw) = weight.shape
+
+    assert c1 == c, f"Shape mismatch: input={input.shape}, weight={weight.shape}"
+    assert fh == 3 and fw == 3, f"Only 3x3 filters supported, got {fh}x{fw}"
+
+    output = np.zeros((b, k, ih, iw), dtype=np.int32)
+
+    input_padded = np.zeros((b, c1, ih + 2, iw + 2), dtype=np.int32)
+    input_padded[:, :, 1:-1, 1:-1] = input
+
+    for bi in range(b):
+        for ki in range(k):
+            for y in range(ih):
+                for x in range(iw):
+                    output[bi, ki, y, x] = ima_sum(
+                        input_padded[bi, :, y:y + 3, x:x + 3].flatten(),
+                        weight[ki, :, :, :].flatten(),
+                        16, 16
+                    )
+
+    return output
+
+
 def main():
     n = 512
     size = 32
