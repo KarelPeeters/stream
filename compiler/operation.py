@@ -390,7 +390,7 @@ def map_int(f: float) -> int:
 class Buffer:
     dtype: DataType
 
-    data_shape: Tuple[int]
+    inner_shape: Tuple[int]
     padding: Tuple[Tuple[int, int]]
 
     pointer_l3: Pointer
@@ -402,7 +402,7 @@ class Buffer:
     inner_simulated: Optional[np.array] = None
 
     def __post_init__(self):
-        assert len(self.data_shape) == len(self.padding)
+        assert len(self.inner_shape) == len(self.padding)
 
     @property
     def has_padding(self):
@@ -410,12 +410,12 @@ class Buffer:
 
     @property
     def padded_tensor(self):
-        padded_shape = tuple([start + size + end for size, (start, end) in zip(self.data_shape, self.padding)])
+        padded_shape = tuple([start + size + end for size, (start, end) in zip(self.inner_shape, self.padding)])
         return Tensor.simple(self.dtype, padded_shape)
 
     @property
     def slices(self):
-        return [slice(start, start + size) for size, (start, _) in zip(self.data_shape, self.padding)]
+        return [slice(start, start + size) for size, (start, _) in zip(self.inner_shape, self.padding)]
 
     @property
     def inner_tensor(self):

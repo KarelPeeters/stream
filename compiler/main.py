@@ -72,15 +72,36 @@ class State:
         # define inputs and constants
         for input in onnx_model.graph.input:
             shape = tuple(d.dim_value for d in list(input.type.tensor_type.shape.dim))
-            buffer = self.define_buffer(input.name, shape, DataType.Int8, const=True)
+
+            used_as_conv_input = False
+            for cn in self.workload:
+                if cn.equation == EQUATION_CONV:
+                    if cn.input_names[0] == input.name:
+                        used_as_conv_input = True
+                        break
+
+            if used_as_conv_input:
+                assert len(shape) == 4, f"Conv input must be 4D, got shape {shape}"
+                b, c, h, w = shape
+                inner_shape = b, h, w, c
+                padding = ((0, 0), (1, 1), (1, 1), (0, 0))
+            else:
+                inner_shape = shape
+                padding = None
+
+            buffer = self.define_buffer(
+                name=input.name, dtype=DataType.Int8,
+                inner_shape=inner_shape, padding=padding,
+                const=True
+            )
 
             buffer.input = True
-            buffer.inner_simulated = random_ima_input(shape)
+            buffer.inner_simulated = random_ima_input(inner_shape)
 
         for const in onnx_model.graph.initializer:
             onnx_shape = tuple(const.dims)
 
-            # weights are stored with the K/output axis last
+            # special case weight ranks
             if len(onnx_shape) == 1:
                 # skip biases for now
                 continue
@@ -89,11 +110,12 @@ class State:
                 shape = c, k
             elif len(onnx_shape) == 4:
                 k, c, h, w = onnx_shape
-                shape = c, h, w, k
+                shape = h, w, c, k
             else:
                 raise KeyError(f"Unexpected weight rank {len(onnx_shape)}")
 
-            buffer = self.define_buffer(const.name, shape, DataType.Int4, const=True)
+            buffer = self.define_buffer(name=const.name, dtype=DataType.Int4, inner_shape=shape, padding=None,
+                                        const=True)
             buffer.const = True
             buffer.inner_simulated = random_ima_weight(shape)
 
@@ -106,7 +128,10 @@ class State:
 
     def define_buffer(
             self,
-            name, shape: tuple, dtype: DataType,
+            name,
+            dtype: DataType,
+            inner_shape: tuple,
+            padding: Optional[tuple],
             const: bool,
             allow_existing: bool = False
     ) -> Buffer:
@@ -119,28 +144,19 @@ class State:
 
         upper = name_to_c_upper(name)
 
+        print(f"Defining buffer {name} {upper} dtype={dtype}, inner_shape={inner_shape}, padding={padding}, const={const}")
+
         if const:
             pointer_l3 = Pointer(f"(L3_CONST_START + L3_CONST_OFFSET_{upper})", MemoryKind.L3)
         else:
             pointer_l3 = Pointer(f"(L3_DYN_START + L3_DYN_OFFSET_{upper})", MemoryKind.L3)
 
-        # pad if used as conv input
-        used_as_conv_io = False
-        for cn in self.workload:
-            if cn.equation == EQUATION_CONV:
-                if cn.input_names[0] == name or cn.output_names[0] == name:
-                    used_as_conv_io = True
-                    break
-
-        if used_as_conv_io:
-            assert len(shape) == 4, f"Conv input/output must be 4D, got shape {shape}"
-            padding = ((0, 0), (0, 0), (1, 1), (1, 1))
-        else:
-            padding = tuple([(0, 0)] * len(shape))
+        if padding is None:
+            padding = tuple([(0, 0)] * len(inner_shape))
 
         buffer = Buffer(
             dtype=dtype,
-            data_shape=shape,
+            inner_shape=inner_shape,
             padding=padding,
             pointer_l3=pointer_l3,
         )
@@ -281,7 +297,8 @@ def visit_matmul(core: int, workload, cn: ComputationNode, orig_cn: ComputationN
 
     # get full output buffer
     output = state.define_buffer(
-        output_name, (b_full, k_full), dtype=DataType.Int8,
+        name=output_name, dtype=DataType.Int8,
+        inner_shape=(b_full, k_full), padding=None,
         const=False,
         allow_existing=True
     )
@@ -418,7 +435,9 @@ def visit_conv(core: int, workload, cn: ComputationNode, orig_cn: ComputationNod
 
     # get full output buffer
     output = state.define_buffer(
-        output_name, (b_full, k_full, oy_full, ox_full), dtype=DataType.Int8,
+        name=output_name, dtype=DataType.Int8,
+        inner_shape=(b_full, oy_full, ox_full, k_full),
+        padding=((0, 0), (1, 1), (1, 1), (0, 0)),
         const=False,
         allow_existing=True
     )
@@ -427,9 +446,10 @@ def visit_conv(core: int, workload, cn: ComputationNode, orig_cn: ComputationNod
     full_weight = weight.padded_tensor
     full_output = output.inner_tensor
 
-    piece_input = full_input[b_start:b_end, c_start:c_end, 1 + iy_start:1 + iy_end, 1 + ix_start:1 + ix_end]
-    piece_weight = full_weight[c_start:c_end, :, :, k_start:k_end]  # stores with K at the end
-    piece_output = full_output[b_start:b_end, k_start:k_end, oy_start:oy_end, ox_start:ox_end]
+    # everything is transposed, careful
+    piece_input = full_input[b_start:b_end, 1 + iy_start:1 + iy_end, 1 + ix_start:1 + ix_end, c_start:c_end]
+    piece_weight = full_weight[:, :, c_start:c_end, k_start:k_end]
+    piece_output = full_output[b_start:b_end, oy_start:oy_end, ox_start:ox_end, k_start:k_end]
 
     # allocate temporary buffers
     tmp_alloc = LinearAllocator()
@@ -500,9 +520,15 @@ def visit_conv(core: int, workload, cn: ComputationNode, orig_cn: ComputationNod
     state.push_operation(core, OperationPad())
 
     if state.simulate and output.inner_simulated is None:
-        # (c h w k) -> (k c h w)
-        weight_trans = weight.inner_simulated.transpose([3, 0, 1, 2])
-        output.inner_simulated = ima_conv(input.inner_simulated, weight_trans)
+        # (h w c k) -> (k c h w)
+        weight_trans = weight.inner_simulated.transpose([3, 2, 0, 1])
+        # (b h w c) -> (b c h w)
+        input_trans = input.inner_simulated.transpose([0, 3, 1, 2])
+
+        output_trans = ima_conv(input_trans, weight_trans)
+
+        # (b k h w) -> (b h w k)
+        output.inner_simulated = output_trans.transpose([0, 2, 3, 1])
 
 
 def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvaluation):
@@ -663,7 +689,7 @@ def generate_data(f, state: State, d_bin):
             f.writeln(f"#define {offset_name} {offset}")
 
         print(f"Buffer {upper}")
-        print(f"  shape: {buffer.data_shape}")
+        print(f"  inner_shape: {buffer.inner_shape}")
         print(f"  padding: {buffer.padding}")
         if buffer.inner_simulated is not None:
             print(f"  values: {buffer.inner_simulated.tolist()}")
