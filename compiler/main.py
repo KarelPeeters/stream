@@ -144,7 +144,8 @@ class State:
 
         upper = name_to_c_upper(name)
 
-        print(f"Defining buffer {name} {upper} dtype={dtype}, inner_shape={inner_shape}, padding={padding}, const={const}")
+        print(
+            f"Defining buffer {name} {upper} dtype={dtype}, inner_shape={inner_shape}, padding={padding}, const={const}")
 
         if const:
             pointer_l3 = Pointer(f"(L3_CONST_START + L3_CONST_OFFSET_{upper})", MemoryKind.L3)
@@ -425,10 +426,10 @@ def visit_conv(core: int, workload, cn: ComputationNode, orig_cn: ComputationNod
     assert ix_start == ox_start - 1
     assert iy_full == oy_full + 1
     assert ix_full == ox_full + 1
-
-    for node in [orig_cn, cn]:
-        assert node.loop_ranges['IX'] == (-1, ox_end + 1)
-        assert node.loop_ranges['IY'] == (-1, oy_end + 1)
+    assert iy_start == oy_start - 1
+    assert iy_end == oy_end + 1
+    assert ix_start == ox_start - 1
+    assert ix_end == ox_end + 1
 
     comment = f"conv b={b_start}..{b_end}, k={k_start}..{k_end}, c={c_start}..{c_end} ox={ox_start}..{ox_end} oy={oy_start}..{oy_end}"
     state.push_operation(core, OperationComment(comment))
