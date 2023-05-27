@@ -78,9 +78,14 @@ def ima_conv(input, weight):
         for ki in range(k):
             for y in range(ih):
                 for x in range(iw):
+                    # ensure order of operations matches what the IMA will be doing
+                    # (c, fh, fw) -> (fh, fw, c)
+                    input_slice = input_padded[bi, :, y:y + 3, x:x + 3].transpose([1, 2, 0])
+                    weight_slice = weight[ki, :, :, :].transpose([1, 2, 0])
+
                     output[bi, ki, y, x] = ima_sum(
-                        input_padded[bi, :, y:y + 3, x:x + 3].flatten(),
-                        weight[ki, :, :, :].flatten(),
+                        input_slice.flatten(),
+                        weight_slice.flatten(),
                         16, 16
                     )
 
