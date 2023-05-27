@@ -5,10 +5,9 @@ from typing import Generator, Tuple, Any
 
 from zigzag.classes.cost_model.cost_model import CostModelEvaluation
 from zigzag.classes.stages import MainStage, MinimalLatencyStage, SpatialMappingGeneratorStage, LomaStage, \
-    CostModelStage, Stage
+    CostModelStage
 
 from stream.classes.stages import IntraCoreMappingStage
-from stream.classes.workload.computation_node import ComputationNode
 
 logger = logging.getLogger(__name__)
 
@@ -65,27 +64,63 @@ class ImaCostModelEvaluation(CostModelEvaluation):
         # TODO ensure that this is actually an IMA core
         core = self.accelerator.get_core(self.core_id)
 
-        # TODO is is extraction of b, k, c correct?
-        k = None
-        c = None
+        # TODO is any of this reasonable? we're basically ignoring
+        #   the mapping engines completely
 
-        for key, value in self.spatial_mapping.spatial_loop_dim_size:
-            if key == "K":
-                k = value
-            elif key == "C":
-                c = value
+        spatial_dims = {}
+        for dim, size in self.spatial_mapping.spatial_loop_dim_size:
+            assert int(size) == size
+            spatial_dims[dim] = int(size)
 
-        assert k is not None and c is not None
-        assert round(k) == k and round(c) == c
-        k = round(k)
-        c = round(c)
+        temporal_dims = {}
+        for operand, values in self.mapping.temporal_mapping.mapping_dic_origin.items():
+            total_sizes = {}
 
-        # TODO assert there is no k,c axes in temporal mapping (to ensure we don't need to rewrite the weights)
-        b = self.temporal_mapping.total_cycle
+            # TODO what does this second list mean?
+            assert len(values) == 2 and len(values[1]) == 0
+            values = values[0]
 
-        factor = job_b_factor[f"{k}x{c}"]
-        plot_cycles = plot_per_area * k * c
-        job_cycles = job_offset + factor * b
+            for dim, size in values:
+                assert int(size) == size
+                size = int(size)
+
+                if dim not in total_sizes:
+                    total_sizes[dim] = 1
+                total_sizes[dim] *= size
+            for dim, size in total_sizes.items():
+                if dim in temporal_dims:
+                    assert temporal_dims[dim] == size
+                else:
+                    temporal_dims[dim] = size
+
+        assert len(spatial_dims.keys() & temporal_dims.keys()) == 0
+        all_dims = spatial_dims | temporal_dims
+
+        if all_dims.keys() == {"B", "K", "C"}:
+            # matmul
+            ima_b = all_dims["B"]
+            ima_k = all_dims["K"]
+            ima_c = all_dims["C"]
+        elif all_dims.keys() == {"B", "K", "C", "OY", "OX", "FY", "FX"} or all_dims.keys() == {"K", "C", "OY", "OX",
+                                                                                               "FY", "FX"}:
+            # conv
+            B = all_dims.get("B", 1)
+            K = all_dims["K"]
+            C = all_dims["C"]
+            OY = all_dims["OY"]
+            OX = all_dims["OX"]
+            FY = all_dims["FY"]
+            FX = all_dims["FX"]
+
+            ima_b = B * OY * OX
+            ima_k = K
+            ima_c = C * FY * FX
+        else:
+            raise KeyError(f"Unexpected combination of dims: {all_dims}")
+
+        factor = job_b_factor[f"{ima_k}x{ima_c}"]
+        plot_cycles = plot_per_area * ima_k * ima_c
+        job_cycles = job_offset + factor * ima_b
         total_cycles = plot_cycles + job_cycles
 
         # print(f"IMA cost evaluation for {b}x{k}x{c} => {plot_cycles}+{job_cycles}={total_cycles}")
