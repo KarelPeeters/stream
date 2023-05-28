@@ -200,8 +200,6 @@ class MemoryManager:
             total_eviction_link_energy_cost += eviction_link_energy_cost
             total_eviction_memory_energy_cost += eviction_memory_energy_cost
 
-        self.record(StepAddTensorToCore(core, tensor))
-
         # Now that we have enough space, we add this tensor
         self.top_instance_stored_tensors[top_instance].append(tensor)
         self.top_instance_stored_since_timestep[top_instance][
@@ -237,6 +235,11 @@ class MemoryManager:
                 [timestep, all_usages[insert_idx - 1] + tensor.size],
                 axis=0,
             )
+
+        self.record(StepAddTensorToCore(
+            time_start=timestep, time_end=timestep + timestep_delta,
+            core=core, tensor=tensor
+        ))
 
         return (
             timestep,
@@ -431,8 +434,6 @@ class MemoryManager:
             )  # no tensors to avoid evicting on offchip core
             # self.current_timestep[core][top_level_idx] = current_timestep
 
-        self.record(StepRemoveTensorFromCore(core, tensor, should_be_written_to_offchip))
-
         try:
             top_instance = self.top_instances[core][top_level_idx]
             equivalent_tensor = next(
@@ -482,6 +483,11 @@ class MemoryManager:
                 [current_timestep, all_usages[insert_idx - 1] - tensor.size],
                 axis=0,
             )
+
+        self.record(StepRemoveTensorFromCore(
+            time_start=timestep, time_end=current_timestep,
+            core=core, tensor=tensor, write_offchip=should_be_written_to_offchip
+        ))
 
         return current_timestep, total_link_energy_cost, total_memory_energy_cost
 

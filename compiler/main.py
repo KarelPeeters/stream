@@ -4,6 +4,7 @@ from typing import Optional, Dict, List
 
 import numpy as np
 import onnx
+from matplotlib import pyplot as plt
 from networkx import DiGraph
 from onnx import ModelProto
 from zigzag.classes.cost_model.cost_model import CostModelEvaluation
@@ -15,6 +16,8 @@ from compiler.operation import Operation, MemoryKind, Pointer, Lock, Profile, Cy
     Buffer, OperationPad, CyclesInfo, ProfileInfo, OperationRecordCycles, OperationLockIncrement, OperationLockWait, \
     OperationCopy2D, Tensor, OperationComment, OperationConvPadded, OperationCopy3D
 from compiler.plot_profile import plot_profile
+from stream.classes.cost_model.cost_model import StreamCostModelEvaluation
+from stream.classes.cost_model.record import Step, StepAddTensorToCore, StepRemoveTensorFromCore, StepRunNode
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.workload.computation_node import ComputationNode
 
@@ -752,9 +755,133 @@ def generate_code(state: State, project_path):
         generate_core_dispatch(f, len(state.operations_per_core))
 
 
-def compile_and_run(onnx_path, scme, node_hw_performances, pulp_sdk_path, project_path, simulate: bool, run: bool,
-                    plot: bool):
+class TensorMerger:
+    def __init__(self):
+        self.groups = []
+        self.tensor_to_group = {}
+
+    def get_group(self, tensor) -> int:
+        hash = tensor.equality_hash()
+        if hash in self.tensor_to_group:
+            return self.tensor_to_group[hash]
+
+        group = len(self.groups)
+        self.groups.append({hash})
+        self.tensor_to_group[hash] = group
+        return group
+
+    def merge_groups(self, x_group: int, y_group: int):
+        if x_group == y_group:
+            return
+
+        self.groups[x_group] |= self.groups[y_group]
+        self.groups[y_group] = None
+
+        for k in self.tensor_to_group:
+            if self.tensor_to_group[k] == y_group:
+                self.tensor_to_group[k] = x_group
+
+        return x_group
+
+    def merge_matching_tensors(self, inputs):
+        for i, x in enumerate(inputs):
+            for y in inputs[i + 1:]:
+                if x.origin == y.origin and x.layer_operand == y.layer_operand:
+                    x_group = self.get_group(x)
+                    y_group = self.get_group(y)
+                    self.merge_groups(x_group, y_group)
+
+    def final_groups(self):
+        return [g for g in self.groups if g is not None]
+
+
+def tensor_core_allocations(steps: List[Step]):
+    core_tensor_lifetime = {}
+    hash_to_tensor = {}
+    max_lifetime = 0
+
+    merger = TensorMerger()
+
+    # TODO handle the case where a tensor is evicted and then later loaded back onto the same core
+    for step in steps:
+        print(step)
+        max_lifetime = max(max_lifetime, step.time_end)
+
+        if isinstance(step, StepAddTensorToCore):
+            key = (step.core, step.tensor.equality_hash())
+            hash_to_tensor.setdefault(step.tensor.equality_hash(), step.tensor)
+
+            assert key not in core_tensor_lifetime
+            core_tensor_lifetime[key] = [step.time_start, None, None]
+
+        elif isinstance(step, StepRemoveTensorFromCore):
+            key = (step.core, step.tensor.equality_hash())
+            hash_to_tensor.setdefault(step.tensor.equality_hash(), step.tensor)
+
+            if key in core_tensor_lifetime:
+                assert core_tensor_lifetime[key][2] is None
+                core_tensor_lifetime[key][2] = step.time_start
+            else:
+                print(f"  Warning: {step} has no matching add step")
+
+        elif isinstance(step, StepRunNode):
+            for x in step.inputs:
+                print(f"  {x}")
+
+            for x in step.inputs:
+                key = (step.core, x.equality_hash())
+                core_tensor_lifetime[key][1] = step.time_end
+
+            merger.merge_matching_tensors(step.inputs)
+        else:
+            assert False, f"Unknown step type {step}"
+
+        print()
+
+    print("grouped tensors: ")
+    for group_hashes in merger.final_groups():
+        group = [hash_to_tensor[h] for h in group_hashes]
+        print(f"  : {group}")
+
+    fig, axes = plt.subplots(
+        nrows=len(core_tensor_lifetime),
+        sharex="all", squeeze=False, figsize=(32, 32)
+    )
+    axes = axes.squeeze(1)
+
+    for i, ((core, tensor_hash), [start, last_used, end]) in enumerate(core_tensor_lifetime.items()):
+        tensor = hash_to_tensor[tensor_hash]
+        print(f"Slice {core} {tensor} {start}..{end} last={last_used}")
+
+        ax = axes[i]
+        ax.set_ylabel(f"{core.id}, {tensor.id}", rotation='horizontal', ha='right')
+
+        if end is None:
+            end = max_lifetime
+
+        if start is not None and end is not None:
+            if last_used is None:
+                ax.axvspan(start, end, facecolor="b", alpha=1.0)
+            else:
+                ax.axvspan(start, last_used, facecolor="g", alpha=1.0)
+                ax.axvspan(last_used, end, facecolor="r", alpha=1.0)
+        else:
+            print(f"Warning: {core} {tensor} has invalid lifetime {start}..{end}")
+
+    # fig.tight_layout()
+    plt.savefig("outputs/tensor_core_life.png")
+    plt.show(block=False)
+
+
+def compile_and_run(
+        onnx_path, scme: StreamCostModelEvaluation, node_hw_performances,
+        pulp_sdk_path, project_path,
+        simulate: bool, run: bool, plot: bool
+):
     print("Collecting workload")
+
+    tensor_core_allocations(scme.recording.steps)
+    return
 
     assert onnx_path.endswith(".onnx")
     onnx_model = onnx.load(onnx_path, load_external_data=False)

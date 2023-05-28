@@ -282,7 +282,10 @@ def schedule_graph(
         # Add this node to the scheduled nodes
         scheduled_nodes.add(best_candidate)
 
-        recording.push(StepRunNode(best_candidate))
+        recording.push(StepRunNode(
+            time_start=start, time_end=end,
+            core=core, node=best_candidate, inputs=tensors_this_candidate_needs
+        ))
 
         ## Step 6
         # Memory usage: When the node ends:

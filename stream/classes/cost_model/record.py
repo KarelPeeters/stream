@@ -1,30 +1,41 @@
 from abc import ABC
 from dataclasses import dataclass
+from typing import Tuple
+
+from zigzag.classes.hardware.architecture.core import Core
 
 from stream.classes.workload.computation_node import ComputationNode
 from stream.classes.workload.tensor import Tensor
 
 
+@dataclass(kw_only=True)
 class Step(ABC):
-    pass
+    time_start: int
+    time_end: int
 
 
-@dataclass
+@dataclass(kw_only=True)
 class StepAddTensorToCore(Step):
-    core: int
+    core: Core
     tensor: Tensor
 
 
-@dataclass
+@dataclass(kw_only=True)
 class StepRemoveTensorFromCore(Step):
-    core: int
+    time_start: int
+    time_end: int
+    core: Core
     tensor: Tensor
     write_offchip: bool
 
 
-@dataclass
+@dataclass(kw_only=True)
 class StepRunNode(Step):
+    time_start: int
+    time_end: int
+    core: Core
     node: ComputationNode
+    inputs: Tuple[Tensor]
 
 
 class RecordedSchedule:
@@ -33,7 +44,3 @@ class RecordedSchedule:
 
     def push(self, step: Step):
         self.steps.append(step)
-
-
-class RemoveTensorFromCore(Step):
-    pass
