@@ -1,9 +1,10 @@
-from operator import attrgetter, itemgetter
-from networkx import DiGraph
-from stream.classes.cost_model.memory_manager import MemoryManager
-from stream.classes.hardware.architecture.accelerator import Accelerator
-from stream.classes.workload.tensor import Tensor
 import logging
+from operator import attrgetter, itemgetter
+
+from networkx import DiGraph
+
+from stream.classes.cost_model.record import RecordedSchedule, StepRunNode
+from stream.classes.hardware.architecture.accelerator import Accelerator
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,10 @@ def schedule_graph(
         cores_start_offset (dict, optional): A dict containing for each core_id its start offset. Defaults to None.
         operands_to_prefetch (list, optional): The layer operands that should be prefetched at the start of the schedule.
     """
+
+    recording = RecordedSchedule()
+    accelerator.memory_manager.recording = recording
+
     # Initialize total link energy cost and memory energy costs
     total_cn_onchip_energy = 0
     total_cn_offchip_link_energy, total_cn_offchip_memory_energy = 0, 0
@@ -277,6 +282,8 @@ def schedule_graph(
         # Add this node to the scheduled nodes
         scheduled_nodes.add(best_candidate)
 
+        recording.push(StepRunNode(best_candidate))
+
         ## Step 6
         # Memory usage: When the node ends:
         # Decrease the priority of all the tensors this node used
@@ -343,8 +350,8 @@ def schedule_graph(
         [
             l.available_from
             for l in list(
-                set(d["cl"] for _, _, d in accelerator.cores.edges(data=True))
-            )
+            set(d["cl"] for _, _, d in accelerator.cores.edges(data=True))
+        )
         ]
     )
     latency = max(cn_end_times, link_end_times)
@@ -361,4 +368,5 @@ def schedule_graph(
         total_sink_layer_output_offchip_memory_energy,
         total_core_to_core_link_energy,
         total_core_to_core_memory_energy,
+        recording,
     )

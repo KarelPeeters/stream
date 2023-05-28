@@ -1,4 +1,5 @@
 from networkx import DiGraph
+from stream.classes.cost_model.record import RecordedSchedule
 
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.cost_model.scheduler import schedule_graph
@@ -70,6 +71,9 @@ class StreamCostModelEvaluation:
             results[8],
             results[9],
         )
+
+        self.recording = results[10]
+        assert isinstance(self.recording, RecordedSchedule)
 
         self.energy = (
             self.total_cn_onchip_energy

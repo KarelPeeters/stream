@@ -1,6 +1,8 @@
 from itertools import combinations
 import numpy as np
+from typing import Optional
 
+from stream.classes.cost_model.record import Step, RecordedSchedule, StepAddTensorToCore, StepRemoveTensorFromCore
 # from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.workload.tensor import Tensor
 import bisect
@@ -73,6 +75,12 @@ class MemoryManager:
                     )
 
         self.offchip_core_id = self.accelerator.offchip_core_id
+
+        self.recording: Optional[RecordedSchedule] = None
+
+    def record(self, step: Step):
+        if self.recording is not None:
+            self.recording.push(step)
 
     def contains(self, tensor: Tensor, core_id: int):
         core = self.accelerator.get_core(core_id)
@@ -191,6 +199,8 @@ class MemoryManager:
                 timestep = end_of_eviction_timestep
             total_eviction_link_energy_cost += eviction_link_energy_cost
             total_eviction_memory_energy_cost += eviction_memory_energy_cost
+
+        self.record(StepAddTensorToCore(core, tensor))
 
         # Now that we have enough space, we add this tensor
         self.top_instance_stored_tensors[top_instance].append(tensor)
@@ -420,6 +430,8 @@ class MemoryManager:
                 tensor, self.offchip_core_id, transfer_start, transfer_end, []
             )  # no tensors to avoid evicting on offchip core
             # self.current_timestep[core][top_level_idx] = current_timestep
+
+        self.record(StepRemoveTensorFromCore(core, tensor, should_be_written_to_offchip))
 
         try:
             top_instance = self.top_instances[core][top_level_idx]
