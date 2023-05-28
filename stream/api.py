@@ -141,6 +141,8 @@ def export_onnx(path):
 
 
 def main():
+    random.seed(0xdeadbeef)
+
     # accelerator = 'inputs.examples.hardware.TPU_like_quad_core'
     # workload = 'inputs.examples.workload.resnet18_few_layers'
     # mapping = 'inputs.examples.mapping.tpu_like_quad_core'
