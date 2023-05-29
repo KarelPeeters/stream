@@ -6,9 +6,9 @@ import onnx
 from networkx import DiGraph
 from zigzag.classes.cost_model.cost_model import CostModelEvaluation
 
-from compiler.core_allocation import collect_tensor_groups, allocate_per_core
 from compiler.allocator import LinearAllocator
 from compiler.codegen import generate_code, State, EQUATION_MATMUL, EQUATION_CONV
+from compiler.core_allocation import collect_tensor_groups, allocate_per_core
 from compiler.data_type import DataType
 from compiler.ima_simulate import ima_matmul, ima_conv
 from compiler.operation import MemoryKind, Pointer, OperationMatmul, \
@@ -16,6 +16,7 @@ from compiler.operation import MemoryKind, Pointer, OperationMatmul, \
     OperationComment, OperationConvPadded
 from compiler.plot_profile import plot_profile
 from stream.classes.cost_model.cost_model import StreamCostModelEvaluation
+from stream.classes.cost_model.record import Step, StepRemoveTensorFromCore, StepRunNode, StepAddTensorToCore
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.workload.computation_node import ComputationNode
 
@@ -291,6 +292,39 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
         raise ValueError(f"Unrecognised equation {cn.equation}")
 
 
+# TODO decide on the strides of all full tensors beforehand instead of this hacky trick
+def visit_step(state: State, step_index: int, step: Step):
+    if isinstance(step, StepAddTensorToCore):
+        tensor = step.tensor
+        core = step.core.id
+
+        group = state.groups.get_group(tensor)
+        token = state.allocations.step_group_to_token[step_index][group.index]
+
+        if core == state.core_count:
+            # skip things happening to the offchip core
+            # this is either an initial placement or a core->offchip copy that has a corresponding write_offchip step
+            return
+
+        print(
+            f"add tensor to core {step.time_start}..{step.time_end} {core} tensor {tensor} group {group.index} token {token}")
+    elif isinstance(step, StepRemoveTensorFromCore):
+        # we only need to do something if the output has to be streamed back
+        if not step.write_offchip:
+            return
+
+        tensor = step.tensor
+        group = state.groups.get_group(tensor)
+        token = state.allocations.step_group_to_token[step_index][group.index]
+
+        print(
+            f"write tensor offchip {step.time_start}..{step.time_end} core {step.core.id} tensor {tensor} group {group.index} token {token}")
+    elif isinstance(step, StepRunNode):
+        print(f"run node {step.time_start}..{step.time_end} {step.node}")
+    else:
+        assert False, f"Unknown step type {step}"
+
+
 def compile_and_run(
         onnx_path, scme: StreamCostModelEvaluation, node_hw_performances,
         pulp_sdk_path, project_path,
@@ -330,6 +364,9 @@ def compile_and_run(
         groups=groups, allocations=allocations,
         simulate=simulate
     )
+
+    for (step_index, step) in enumerate(steps):
+        visit_step(state, step_index, step)
 
     return
 
