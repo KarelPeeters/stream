@@ -36,14 +36,17 @@ class Token:
 
 @dataclass
 class AllocationHistory:
-    size: int
+    size: Optional[int]
+    size_used: int
     history: List[Tuple[float, List[Tuple[int, int]]]]
 
     def plot_history(self, path: Optional[str], block: bool):
+        plot_size = self.size if self.size is not None else self.size_used
+
         # plot patch
         ax = plt.figure(figsize=(16, 16)).gca()
         ax.set_xlim(0, self.history[-1][0])
-        ax.set_ylim(0, self.size)
+        ax.set_ylim(0, plot_size)
 
         for i, (time_start, free_segments) in enumerate(self.history):
             if i < len(self.history) - 1:
@@ -58,10 +61,13 @@ class AllocationHistory:
                 if start != prev_end:
                     ax.add_patch(plt.Rectangle((time_start, prev_end), time_delta, start - prev_end, color='r'))
 
+                if end is None:
+                    end = plot_size
+
                 ax.add_patch(plt.Rectangle((time_start, start), time_delta, end - start, color='g'))
                 prev_end = end
 
-            if prev_end != self.size:
+            if prev_end != plot_size:
                 ax.add_patch(
                     plt.Rectangle((time_start, prev_end), time_delta, self.size - prev_end, color='r'))
 
@@ -89,7 +95,7 @@ class TimeAllocator:
         token.time_end = time
 
     # TODO use a better memory allocation algorithm for this
-    def run_allocation(self, size: int, final_time: float) -> AllocationHistory:
+    def run_allocation(self, size: Optional[int], final_time: float) -> AllocationHistory:
         assert not self.allocated, "Allocation has already happened"
         self.allocated_size = size
 
@@ -109,6 +115,7 @@ class TimeAllocator:
 
         # loop over potential event times
         history.append((self.start_time, list(free_segments)))
+        size_used = 0
 
         for t in times:
             print(f"T={t}, free_segments={free_segments}")
@@ -118,15 +125,18 @@ class TimeAllocator:
                 if token.time_start == t:
                     print(f"Allocating token {token.index}")
                     for (seg_index, (seg_start, seg_end)) in enumerate(free_segments):
-                        if (seg_end - seg_start) >= token.size:
+                        if seg_end is None or (seg_end - seg_start) >= token.size:
                             token.offset = seg_start
+                            size_used = max(size_used, seg_start + token.size)
 
-                            if (seg_end - seg_start) == token.size:
+                            if seg_end is not None and (seg_end - seg_start) == token.size:
                                 free_segments.pop(seg_index)
                             else:
                                 free_segments[seg_index] = (seg_start + token.size, seg_end)
 
                             break
+                    else:
+                        raise ValueError(f"Failed to allocate {token}")
 
             # free old tensors (after allocating new ones, just be extre safe there's no overlap)
             for token in self.tokens:
@@ -153,7 +163,7 @@ class TimeAllocator:
 
             history.append((t, list(free_segments)))
 
-        return AllocationHistory(size, history)
+        return AllocationHistory(size, size_used, history)
 
 
 def main():
@@ -167,7 +177,7 @@ def main():
     # alloc.free(c)
     d = alloc.alloc(512, 20)
 
-    alloc.run_allocation(1024, 30).plot_history(None, True)
+    alloc.run_allocation(None, 30).plot_history(None, True)
 
     for token in alloc.tokens:
         print(token)
