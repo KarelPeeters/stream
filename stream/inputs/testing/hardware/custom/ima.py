@@ -32,7 +32,7 @@ def basic_memory_instance(
 
 # TODO ensure that everything refers to the digital clock
 
-def get_memory_hierarchy(multiplier_array, width: int, height: int, weight_size: int):
+def get_memory_hierarchy(multiplier_array, width: int, height: int, weight_bits: int, l1_size_bits: int, l2_size_bits: int):
     # accelerator registers
     reg_input = MemoryInstance(
         name="reg_input", size=8, r_bw=8, w_bw=8, r_cost=0, w_cost=0, area=0,
@@ -40,7 +40,7 @@ def get_memory_hierarchy(multiplier_array, width: int, height: int, weight_size:
     )
 
     reg_weight = MemoryInstance(
-        name="reg_weight", size=weight_size, r_bw=weight_size, w_bw=weight_size, r_cost=0, w_cost=0, area=0,
+        name="reg_weight", size=weight_bits, r_bw=weight_bits, w_bw=weight_bits, r_cost=0, w_cost=0, area=0,
         r_port=1, w_port=1, rw_port=0, latency=1
     )
 
@@ -152,9 +152,9 @@ def get_dataflows(width: int, height: int):
     return [{'D1': ('K', height), 'D2': ('C', width)}]
 
 
-def get_ima_core(id, width: int, height: int, weight_size: int):
+def get_ima_core(id, width: int, height: int, weight_bits: int, l1_bits: int, l2_bits: int):
     operational_array = get_operational_array(width, height)
-    memory_hierarchy = get_memory_hierarchy(operational_array, width, height, weight_size)
+    memory_hierarchy = get_memory_hierarchy(operational_array, width, height, weight_bits, l1_bits, l2_bits)
     dataflows = get_dataflows(width, height)
     core = Core(id, operational_array, memory_hierarchy, dataflows)
     return core
@@ -227,8 +227,9 @@ def get_cores_graph(cores, offchip_core, unit_energy_cost: float):
     return H
 
 
-def ima_with_offchip(core_count: int, width: int, height: int, weight_size: int):
-    cores = [get_ima_core(i, width, height, weight_size) for i in range(core_count)]
+def ima_with_offchip(core_count: int, width: int, height: int, weight_size: int, l1_bits: int, l2_bits: int):
+    # TODO divide l2 by the number of cores?
+    cores = [get_ima_core(i, width, height, weight_size, l1_bits, l2_bits) for i in range(core_count)]
 
     offchip_core_id = core_count
 
@@ -240,4 +241,4 @@ def ima_with_offchip(core_count: int, width: int, height: int, weight_size: int)
 
 
 if __name__ == "__main__":
-    print(ima_with_offchip(2, 1024, 1024, 8))
+    print(ima_with_offchip(2, 1024, 1024, 8, 1024*1024*8, 1024*1024*8))

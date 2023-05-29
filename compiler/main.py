@@ -551,6 +551,7 @@ def allocate_per_core(groups: TensorGroups, steps: List[Step]) -> Dict[int, Time
 def compile_and_run(
         onnx_path, scme: StreamCostModelEvaluation, node_hw_performances,
         pulp_sdk_path, project_path,
+        l1_size: int, l2_size: int,
         simulate: bool, run: bool, plot: bool
 ):
     print("Collecting workload")
@@ -573,12 +574,10 @@ def compile_and_run(
     print("Collecting allocations per core")
     allocators = allocate_per_core(groups, steps)
 
-    L1_SIZE = 0x00100000
     final_time = max(step.time_end for step in steps)
-
     for core, allocator in allocators.items():
         print(f"Allocating for core {core}")
-        history = allocator.run_allocation(L1_SIZE, final_time)
+        history = allocator.run_allocation(l1_size, final_time)
         history.plot_history(f"outputs/alloc_core_{core}.png", False)
 
     return

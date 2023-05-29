@@ -1,5 +1,6 @@
 import os
 import pickle
+import random
 import re
 from typing import Generator
 
@@ -151,13 +152,24 @@ def main():
     # hint_loops = [('B', 'all')]
     # hint_loops = [('OY', 'all'), ('OX', 'all')]
     # hint_loops = [('OY', 'all')]
-    # hint_loops = [('OY', 4)]
-    hint_loops = [('B', 2)]
+    hint_loops = [('OY', 4)]
+    # hint_loops = [('B', 4)]
     # hint_loops = []
+
+    # TODO divide L2 size by the number of cores?
+    # TODO higher level: start properly using L2, maybe just as another global cache external to the cores?
+    l1_size = 0x00100000
+    l2_size = 0x60000000
 
     # accelerator = 'inputs.testing.hardware.dual_testing_core_offchip'
     # TODO use weight_size=4 at some point
-    accelerator = ima_with_offchip(2, 256, 256, 8)
+    # TODO does weight_size even matter any more?
+    accelerator = ima_with_offchip(
+        core_count=2,
+        width=256, height=256,
+        weight_size=4,
+        l1_bits=l1_size * 8, l2_bits=l2_size * 8
+    )
     # workload = 'inputs.testing.workload.testing_workload_for_2_cores'
     # workload = 'inputs.testing.workload.simple_example_workload'
     # workload = r"C:\Documents\Programming\Python\MLPlayGround\branching_conv.onnx"
@@ -186,7 +198,7 @@ def main():
     # TODO clean up plotting bools and blocking
     # TODO why does simulate false cause out-of-bounds RAM errors?
     generate = True
-    simulate = True  # TODO get no-simulation to work
+    simulate = True
     run = True
     plot_stream = True
     plot_profile = True
@@ -216,6 +228,7 @@ def main():
         compile_and_run(
             workload, scme[0], node_hw_performances,
             pulp_sdk_path, project_path,
+            l1_size=l1_size, l2_size=l2_size,
             simulate=simulate, run=run, plot=plot_profile
         )
 
