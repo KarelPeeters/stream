@@ -1,3 +1,4 @@
+import random
 import subprocess
 from dataclasses import dataclass
 from math import prod
@@ -488,34 +489,36 @@ def collect_tensor_groups(steps: List[Step]):
 
 
 @dataclass
-class CoreAllocations:
-    allocators: List[TimeAllocator]
-    core_tensor_to_token: Dict[Tuple[int, Any], Token]
-
-
-@dataclass
 class AllocatedGroup:
     token: Token
     parts_left: int
 
 
-def allocate_per_core(groups: TensorGroups, steps: List[Step]) -> Dict[int, TimeAllocator]:
+@dataclass
+class CoreAllocations:
+    core_allocators: Dict[int, TimeAllocator]
+    step_group_to_token: Dict[int, Dict[int, Token]]
+
+
+def allocate_per_core(groups: TensorGroups, steps: List[Step]) -> CoreAllocations:
     allocators = {}
-    core_group_allocated = {}
+    curr_core_group_allocated = {}
+    step_group_to_token = {}
 
     def core_alloc(core: int):
         if core not in allocators:
             allocators[core] = TimeAllocator(start_time=0)
         return allocators[core]
 
-    for step in steps:
+    for step_index, step in enumerate(steps):
         if isinstance(step, StepAddTensorToCore):
             # allocate entire group at once
             group = groups.get_group(step.tensor)
             key = (step.core.id, group.index)
 
-            if key in core_group_allocated:
-                core_group_allocated[key].parts_left += 1
+            if key in curr_core_group_allocated:
+                alloc = curr_core_group_allocated[key]
+                alloc.parts_left += 1
 
             else:
                 group_size_bits = group.elem_size_bits * prod(end - start for start, end in group.loop_ranges)
@@ -524,7 +527,9 @@ def allocate_per_core(groups: TensorGroups, steps: List[Step]) -> Dict[int, Time
                 token = core_alloc(step.core.id).alloc(group_size_bytes, time=step.time_start)
                 alloc = AllocatedGroup(token, len(group.keys))
 
-                core_group_allocated[key] = alloc
+                curr_core_group_allocated[key] = alloc
+
+            step_group_to_token.setdefault(step_index, {})[group.index] = alloc.token
 
         elif isinstance(step, StepRemoveTensorFromCore):
             # subtract from group, only free if entirely clear
@@ -532,20 +537,27 @@ def allocate_per_core(groups: TensorGroups, steps: List[Step]) -> Dict[int, Time
 
             group = groups.get_group(step.tensor)
             key = (step.core.id, group.index)
-            alloc = core_group_allocated[key]
+            alloc = curr_core_group_allocated[key]
 
             alloc.parts_left -= 1
             if alloc.parts_left == 0:
                 core_alloc(step.core.id).free(alloc.token, time=step.time_end)
-                del core_group_allocated[key]
+                del curr_core_group_allocated[key]
+
+            step_group_to_token.setdefault(step_index, {})[group.index] = alloc.token
 
         elif isinstance(step, StepRunNode):
-            pass
+
+            for tensor in step.inputs:
+                group = groups.get_group(tensor)
+                key = (step.core.id, group.index)
+                alloc = curr_core_group_allocated[key]
+                step_group_to_token.setdefault(step_index, {})[group.index] = alloc.token
 
         else:
             assert False, f"Unknown step type {step}"
 
-    return allocators
+    return CoreAllocations(core_allocators=allocators, step_group_to_token=step_group_to_token)
 
 
 def compile_and_run(
@@ -554,8 +566,10 @@ def compile_and_run(
         l1_size: int, l2_size: int,
         simulate: bool, run: bool, plot: bool
 ):
-    print("Collecting workload")
+    random.seed(0xdeadbeef)
+    np.random.seed(0xdeadbeef)
 
+    print("Collecting workload")
     assert onnx_path.endswith(".onnx")
     onnx_model = onnx.load(onnx_path, load_external_data=False)
     # noinspection PyUnresolvedReferences
@@ -565,20 +579,26 @@ def compile_and_run(
     accelerator: Accelerator = scme.accelerator
     cluster_cores = len(accelerator.cores) - 1
 
-    np.random.seed(0)
-    state = State(onnx_model, workload, cluster_cores, simulate=simulate)
-
     steps = scme.recording.steps
+
     print("Collecting tensor groups")
     groups = collect_tensor_groups(steps)
     print("Collecting allocations per core")
-    allocators = allocate_per_core(groups, steps)
+    allocations = allocate_per_core(groups, steps)
 
     final_time = max(step.time_end for step in steps)
-    for core, allocator in allocators.items():
+    for core, allocator in allocations.core_allocators.items():
         print(f"Allocating for core {core}")
         history = allocator.run_allocation(l1_size, final_time)
         history.plot_history(f"outputs/alloc_core_{core}.png", False)
+
+    # TODO onnx is probably not necessary any more
+    state = State(
+        core_count=cluster_cores,
+        onnx_model=onnx_model, workload=workload,
+        groups=groups, allocations=allocations,
+        simulate=simulate
+    )
 
     return
 

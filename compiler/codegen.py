@@ -56,10 +56,13 @@ EQUATION_CONV = 'O[b][g][k][oy][ox]+=W[k][c][fy][fx]*I[b][g][c][iy][ix]'
 
 
 class State:
-    def __init__(self, onnx_model: ModelProto, workload: DiGraph, core_count: int, simulate: bool):
+    # TODO add type hints to params
+    def __init__(self, core_count: int, onnx_model: ModelProto, workload: DiGraph, groups, allocations, simulate: bool):
         self.onnx_model = onnx_model
         self.workload = workload
         self.simulate = simulate
+        self.groups = groups
+        self.allocations = allocations
 
         self.buffers: Dict[str, Buffer] = {}
         self.core_count = core_count
