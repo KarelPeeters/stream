@@ -5,6 +5,7 @@ import numpy as np
 from networkx import DiGraph
 from onnx import ModelProto
 
+from compiler.core_allocation import TensorGroups, CoreAllocations
 from compiler.allocator import LinearAllocator
 from compiler.data_type import array_to_bytes, DataType
 from compiler.ima_simulate import random_ima_input, random_ima_weight
@@ -56,8 +57,13 @@ EQUATION_CONV = 'O[b][g][k][oy][ox]+=W[k][c][fy][fx]*I[b][g][c][iy][ix]'
 
 
 class State:
-    # TODO add type hints to params
-    def __init__(self, core_count: int, onnx_model: ModelProto, workload: DiGraph, groups, allocations, simulate: bool):
+    def __init__(
+            self,
+            core_count: int,
+            onnx_model: ModelProto, workload: DiGraph,
+            groups: TensorGroups, allocations: CoreAllocations,
+            simulate: bool
+    ):
         self.onnx_model = onnx_model
         self.workload = workload
         self.simulate = simulate
