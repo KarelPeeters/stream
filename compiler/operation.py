@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from compiler.codegen import DataType
+from compiler.data_type import DataType
 
 
 class Operation(ABC):

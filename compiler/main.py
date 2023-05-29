@@ -10,7 +10,7 @@ from onnx import ModelProto
 from zigzag.classes.cost_model.cost_model import CostModelEvaluation
 
 from compiler.allocator import LinearAllocator
-from compiler.codegen import DataType, array_to_bytes
+from compiler.data_type import DataType, array_to_bytes
 from compiler.ima_simulate import random_ima_input, random_ima_weight, ima_matmul, ima_conv
 from compiler.operation import Operation, MemoryKind, Pointer, Lock, Profile, Cycles, OperationCopy, OperationMatmul, \
     Buffer, OperationPad, CyclesInfo, ProfileInfo, OperationRecordCycles, OperationLockIncrement, OperationLockWait, \
