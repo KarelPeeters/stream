@@ -4,12 +4,12 @@ class Tensor:
     """
 
     def __init__(
-        self,
-        size: int,
-        origin=None,
-        layer_operand: str = None,
-        loop_dimensions: tuple = None,
-        loop_ranges: tuple = None,
+            self,
+            size: int,
+            origin=None,
+            layer_operand: str = None,
+            loop_dimensions: tuple = None,
+            loop_ranges: tuple = None,
     ):
         """Initialize the Tensor instance.
 
@@ -56,7 +56,10 @@ class Tensor:
     #         self.loop_ranges == __o.loop_ranges
 
     def equality_hash(self):
-        return hash((self.origin.id[0], self.layer_operand, self.loop_ranges))
+        return hash(self.equality_key())
+
+    def equality_key(self):
+        return self.origin.id[0], self.layer_operand, self.loop_ranges
 
     def set_base_priorities(self, base_priority):
         self.base_priority = base_priority

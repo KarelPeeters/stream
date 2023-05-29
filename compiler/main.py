@@ -1,5 +1,7 @@
 import subprocess
-from typing import List
+from dataclasses import dataclass
+from math import prod
+from typing import List, Dict, Tuple, Any, Set
 
 import numpy as np
 import onnx
@@ -7,7 +9,7 @@ from matplotlib import pyplot as plt
 from networkx import DiGraph
 from zigzag.classes.cost_model.cost_model import CostModelEvaluation
 
-from compiler.allocator import LinearAllocator
+from compiler.allocator import LinearAllocator, TimeAllocator, Token
 from compiler.codegen import generate_code, State, EQUATION_MATMUL, EQUATION_CONV
 from compiler.data_type import DataType
 from compiler.ima_simulate import ima_matmul, ima_conv
@@ -292,19 +294,45 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
         raise ValueError(f"Unrecognised equation {cn.equation}")
 
 
-class TensorMerger:
+@dataclass
+class Group:
+    index: int
+    keys: Set[Any]
+    elem_size_bits: int
+    loop_dimensions: Tuple[str]
+    loop_ranges: Tuple[Tuple[int, int]]
+
+
+@dataclass
+class TensorGroups:
+    key_to_group: Dict[Any, int]
+    key_to_tensor: Dict[Any, Any]
+    groups: List[Group]
+
+    def get_group(self, tensor) -> Group:
+        key = tensor.equality_key()
+        group = self.key_to_group[key]
+        return self.groups[group]
+
+
+class TensorGrouper:
     def __init__(self):
         self.groups = []
-        self.tensor_to_group = {}
+        self.key_to_group = {}
+        self.key_to_tensor = {}
 
-    def get_group(self, tensor) -> int:
-        hash = tensor.equality_hash()
-        if hash in self.tensor_to_group:
-            return self.tensor_to_group[hash]
+    def get_group(self, tensor, allow_new: bool) -> int:
+        key = tensor.equality_key()
+        self.key_to_tensor.setdefault(key, tensor)
+
+        if key in self.key_to_group:
+            return self.key_to_group[key]
+        else:
+            assert allow_new, f"New group not allowed, tensor {tensor}"
 
         group = len(self.groups)
-        self.groups.append({hash})
-        self.tensor_to_group[hash] = group
+        self.groups.append({key})
+        self.key_to_group[key] = group
         return group
 
     def merge_groups(self, x_group: int, y_group: int):
@@ -314,9 +342,9 @@ class TensorMerger:
         self.groups[x_group] |= self.groups[y_group]
         self.groups[y_group] = None
 
-        for k in self.tensor_to_group:
-            if self.tensor_to_group[k] == y_group:
-                self.tensor_to_group[k] = x_group
+        for k in self.key_to_group:
+            if self.key_to_group[k] == y_group:
+                self.key_to_group[k] = x_group
 
         return x_group
 
@@ -324,20 +352,63 @@ class TensorMerger:
         for i, x in enumerate(inputs):
             for y in inputs[i + 1:]:
                 if x.origin == y.origin and x.layer_operand == y.layer_operand:
-                    x_group = self.get_group(x)
-                    y_group = self.get_group(y)
+                    x_group = self.get_group(x, allow_new=False)
+                    y_group = self.get_group(y, allow_new=False)
                     self.merge_groups(x_group, y_group)
 
-    def final_groups(self):
-        return [g for g in self.groups if g is not None]
+    def finish(self) -> TensorGroups:
+        groups = []
+        group_map = []
+
+        for group in self.groups:
+            if group is None:
+                group_map.append(None)
+                continue
+
+            index = len(groups)
+            group_map.append(index)
+
+            loop_dimensions = None
+            loop_ranges = None
+            elem_size_bits = None
+
+            for key in group:
+                tensor = self.key_to_tensor[key]
+
+                if loop_dimensions is None:
+                    loop_dimensions = tensor.loop_dimensions
+                    loop_ranges = list(tensor.loop_ranges)
+                    elem_size_bits = tensor.size / prod(end - start for start, end in tensor.loop_ranges)
+                else:
+                    assert loop_dimensions == tensor.loop_dimensions
+                    assert elem_size_bits == tensor.size / prod(end - start for start, end in tensor.loop_ranges)
+
+                    for i in range(len(loop_dimensions)):
+                        old_min, old_max = loop_ranges[i]
+                        new_min, new_max = tensor.loop_ranges[i]
+                        loop_ranges[i] = (min(old_min, new_min), max(old_max, new_max))
+
+            assert loop_dimensions is not None
+
+            groups.append(Group(index, group, elem_size_bits, loop_dimensions, tuple(loop_ranges)))
+
+        # map group indices
+        key_to_group = {
+            k: group_map[v] for k, v in self.key_to_group.items()
+        }
+
+        return TensorGroups(
+            key_to_group=key_to_group,
+            key_to_tensor=self.key_to_tensor,
+            groups=groups
+        )
 
 
-def tensor_core_allocations(steps: List[Step]):
+def collect_tensor_groups(steps: List[Step]):
     core_tensor_lifetime = {}
-    hash_to_tensor = {}
     max_lifetime = 0
 
-    merger = TensorMerger()
+    merger = TensorGrouper()
 
     # TODO handle the case where a tensor is evicted and then later loaded back onto the same core
     for step in steps:
@@ -345,15 +416,16 @@ def tensor_core_allocations(steps: List[Step]):
         max_lifetime = max(max_lifetime, step.time_end)
 
         if isinstance(step, StepAddTensorToCore):
-            key = (step.core, step.tensor.equality_hash())
-            hash_to_tensor.setdefault(step.tensor.equality_hash(), step.tensor)
+            key = (step.core, step.tensor.equality_key())
 
             assert key not in core_tensor_lifetime
             core_tensor_lifetime[key] = [step.time_start, None, None]
 
+            # ensure a group is created for this tensor
+            merger.get_group(step.tensor, allow_new=True)
+
         elif isinstance(step, StepRemoveTensorFromCore):
-            key = (step.core, step.tensor.equality_hash())
-            hash_to_tensor.setdefault(step.tensor.equality_hash(), step.tensor)
+            key = (step.core, step.tensor.equality_key())
 
             if key in core_tensor_lifetime:
                 assert core_tensor_lifetime[key][2] is None
@@ -361,12 +433,15 @@ def tensor_core_allocations(steps: List[Step]):
             else:
                 print(f"  Warning: {step} has no matching add step")
 
+            # double check that the group for this tensor already exists
+            merger.get_group(step.tensor, allow_new=False)
+
         elif isinstance(step, StepRunNode):
             for x in step.inputs:
                 print(f"  {x}")
 
             for x in step.inputs:
-                key = (step.core, x.equality_hash())
+                key = (step.core, x.equality_key())
                 core_tensor_lifetime[key][1] = step.time_end
 
             merger.merge_matching_tensors(step.inputs)
@@ -375,9 +450,10 @@ def tensor_core_allocations(steps: List[Step]):
 
         print()
 
+    merged_groups = merger.finish()
+
     print("grouped tensors: ")
-    for group_hashes in merger.final_groups():
-        group = [hash_to_tensor[h] for h in group_hashes]
+    for group in merged_groups.groups:
         print(f"  : {group}")
 
     fig, axes = plt.subplots(
@@ -386,12 +462,11 @@ def tensor_core_allocations(steps: List[Step]):
     )
     axes = axes.squeeze(1)
 
-    for i, ((core, tensor_hash), [start, last_used, end]) in enumerate(core_tensor_lifetime.items()):
-        tensor = hash_to_tensor[tensor_hash]
+    for i, ((core, tensor), [start, last_used, end]) in enumerate(core_tensor_lifetime.items()):
         print(f"Slice {core} {tensor} {start}..{end} last={last_used}")
 
         ax = axes[i]
-        ax.set_ylabel(f"{core.id}, {tensor.id}", rotation='horizontal', ha='right')
+        ax.set_ylabel(f"{core.id}, {tensor}", rotation='horizontal', ha='right')
 
         if end is None:
             end = max_lifetime
@@ -409,6 +484,69 @@ def tensor_core_allocations(steps: List[Step]):
     plt.savefig("outputs/tensor_core_life.png")
     plt.show(block=False)
 
+    return merged_groups
+
+
+@dataclass
+class CoreAllocations:
+    allocators: List[TimeAllocator]
+    core_tensor_to_token: Dict[Tuple[int, Any], Token]
+
+
+@dataclass
+class AllocatedGroup:
+    token: Token
+    parts_left: int
+
+
+def allocate_per_core(groups: TensorGroups, steps: List[Step]) -> Dict[int, TimeAllocator]:
+    allocators = {}
+    core_group_allocated = {}
+
+    def core_alloc(core: int):
+        if core not in allocators:
+            allocators[core] = TimeAllocator(start_time=0)
+        return allocators[core]
+
+    for step in steps:
+        if isinstance(step, StepAddTensorToCore):
+            # allocate entire group at once
+            group = groups.get_group(step.tensor)
+            key = (step.core.id, group.index)
+
+            if key in core_group_allocated:
+                core_group_allocated[key].parts_left += 1
+
+            else:
+                group_size_bits = group.elem_size_bits * prod(end - start for start, end in group.loop_ranges)
+                group_size_bytes = (group_size_bits + 7) // 8
+
+                token = core_alloc(step.core.id).alloc(group_size_bytes, time=step.time_start)
+                alloc = AllocatedGroup(token, len(group.keys))
+
+                core_group_allocated[key] = alloc
+
+        elif isinstance(step, StepRemoveTensorFromCore):
+            # subtract from group, only free if entirely clear
+            # TODO theoretically we could free part of the token already, but that's not supported by the allocator yet
+
+            group = groups.get_group(step.tensor)
+            key = (step.core.id, group.index)
+            alloc = core_group_allocated[key]
+
+            alloc.parts_left -= 1
+            if alloc.parts_left == 0:
+                core_alloc(step.core.id).free(alloc.token, time=step.time_end)
+                del core_group_allocated[key]
+
+        elif isinstance(step, StepRunNode):
+            pass
+
+        else:
+            assert False, f"Unknown step type {step}"
+
+    return allocators
+
 
 def compile_and_run(
         onnx_path, scme: StreamCostModelEvaluation, node_hw_performances,
@@ -416,9 +554,6 @@ def compile_and_run(
         simulate: bool, run: bool, plot: bool
 ):
     print("Collecting workload")
-
-    tensor_core_allocations(scme.recording.steps)
-    return
 
     assert onnx_path.endswith(".onnx")
     onnx_model = onnx.load(onnx_path, load_external_data=False)
@@ -432,7 +567,21 @@ def compile_and_run(
     np.random.seed(0)
     state = State(onnx_model, workload, cluster_cores, simulate=simulate)
 
-    nodes = sorted(workload, key=lambda node: node.start)
+    steps = scme.recording.steps
+    print("Collecting tensor groups")
+    groups = collect_tensor_groups(steps)
+    print("Collecting allocations per core")
+    allocators = allocate_per_core(groups, steps)
+
+    L1_SIZE = 0x00100000
+    final_time = max(step.time_end for step in steps)
+
+    for core, allocator in allocators.items():
+        print(f"Allocating for core {core}")
+        history = allocator.run_allocation(L1_SIZE, final_time)
+        history.plot_history(f"outputs/alloc_core_{core}.png", False)
+
+    return
 
     for cn in nodes:
         cn: ComputationNode
