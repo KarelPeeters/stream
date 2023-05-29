@@ -23,7 +23,7 @@ class LinearAllocator:
 
 @dataclass
 class Token:
-    check: int = field(repr=False)
+    check: int
 
     index: int
     size: int

@@ -294,12 +294,13 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
 
 # TODO decide on the strides of all full tensors beforehand instead of this hacky trick
 def visit_step(state: State, step_index: int, step: Step):
+    core = step.core.id
+
     if isinstance(step, StepAddTensorToCore):
         tensor = step.tensor
-        core = step.core.id
 
-        group = state.groups.get_group(tensor)
-        token = state.allocations.step_group_to_token[step_index][group.index]
+        group = state.groups_per_core[core].get_group(tensor)
+        token = state.allocations.get_token_for_tensor(core, group.index, step_index)
 
         if core == state.core_count:
             # skip things happening to the offchip core
@@ -314,8 +315,8 @@ def visit_step(state: State, step_index: int, step: Step):
             return
 
         tensor = step.tensor
-        group = state.groups.get_group(tensor)
-        token = state.allocations.step_group_to_token[step_index][group.index]
+        group = state.groups_per_core[core].get_group(tensor)
+        token = state.allocations.get_token_for_tensor(core, group.index, step_index)
 
         print(
             f"write tensor offchip {step.time_start}..{step.time_end} core {step.core.id} tensor {tensor} group {group.index} token {token}")
@@ -347,21 +348,22 @@ def compile_and_run(
     steps = scme.recording.steps
 
     print("Collecting tensor groups")
-    groups = collect_tensor_groups(steps)
+    groups_per_core = collect_tensor_groups(cluster_cores, steps)
     print("Collecting allocations per core")
-    allocations = allocate_per_core(groups, steps)
+    allocations = allocate_per_core(groups_per_core, steps)
 
     final_time = max(step.time_end for step in steps)
-    for core, allocator in allocations.core_allocators.items():
-        print(f"Allocating for core {core}")
-        history = allocator.run_allocation(l1_size, final_time)
+    for core, allocator in enumerate(allocations.core_allocators):
+        size = None if core == cluster_cores else l1_size
+        print(f"Allocating for core {core} with size {size}")
+        history = allocator.run_allocation(size, final_time)
         history.plot_history(f"outputs/alloc_core_{core}.png", False)
 
     # TODO onnx is probably not necessary any more
     state = State(
         core_count=cluster_cores,
         onnx_model=onnx_model, workload=workload,
-        groups=groups, allocations=allocations,
+        groups_per_core=groups_per_core, allocations=allocations,
         simulate=simulate
     )
 

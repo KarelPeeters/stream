@@ -61,13 +61,13 @@ class State:
             self,
             core_count: int,
             onnx_model: ModelProto, workload: DiGraph,
-            groups: TensorGroups, allocations: CoreAllocations,
+            groups_per_core: List[TensorGroups], allocations: CoreAllocations,
             simulate: bool
     ):
         self.onnx_model = onnx_model
         self.workload = workload
         self.simulate = simulate
-        self.groups = groups
+        self.groups_per_core = groups_per_core
         self.allocations = allocations
 
         self.buffers: Dict[str, Buffer] = {}

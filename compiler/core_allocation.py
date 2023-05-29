@@ -118,11 +118,11 @@ class TensorGrouper:
         )
 
 
-def collect_tensor_groups(steps: List[Step]):
+def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
     core_tensor_lifetime = {}
     max_lifetime = 0
 
-    merger = TensorGrouper()
+    merger_per_core = [TensorGrouper() for _ in range(cores + 1)]
 
     # TODO handle the case where a tensor is evicted and then later loaded back onto the same core
     for step in steps:
@@ -136,7 +136,7 @@ def collect_tensor_groups(steps: List[Step]):
             core_tensor_lifetime[key] = [step.time_start, None, None]
 
             # ensure a group is created for this tensor
-            merger.get_group(step.tensor, allow_new=True)
+            merger_per_core[step.core.id].get_group(step.tensor, allow_new=True)
 
         elif isinstance(step, StepRemoveTensorFromCore):
             key = (step.core, step.tensor.equality_key())
@@ -148,7 +148,7 @@ def collect_tensor_groups(steps: List[Step]):
                 print(f"  Warning: {step} has no matching add step")
 
             # double check that the group for this tensor already exists
-            merger.get_group(step.tensor, allow_new=False)
+            merger_per_core[step.core.id].get_group(step.tensor, allow_new=False)
 
         elif isinstance(step, StepRunNode):
             for x in step.inputs:
@@ -158,17 +158,19 @@ def collect_tensor_groups(steps: List[Step]):
                 key = (step.core, x.equality_key())
                 core_tensor_lifetime[key][1] = step.time_end
 
-            merger.merge_matching_tensors(step.inputs)
+            merger_per_core[step.core.id].merge_matching_tensors(step.inputs)
         else:
             assert False, f"Unknown step type {step}"
 
         print()
 
-    merged_groups = merger.finish()
+    merged_groups_per_core = [m.finish() for m in merger_per_core]
 
     print("grouped tensors: ")
-    for group in merged_groups.groups:
-        print(f"  : {group}")
+    for core, groups in enumerate(merged_groups_per_core):
+        print(f"  core {core}:")
+        for group in groups.groups:
+            print(f"    {group}")
 
     fig, axes = plt.subplots(
         nrows=len(core_tensor_lifetime),
@@ -198,7 +200,7 @@ def collect_tensor_groups(steps: List[Step]):
     plt.savefig("outputs/tensor_core_life.png")
     plt.show(block=False)
 
-    return merged_groups
+    return merged_groups_per_core
 
 
 @dataclass
@@ -209,25 +211,37 @@ class AllocatedGroup:
 
 @dataclass
 class CoreAllocations:
-    core_allocators: Dict[int, TimeAllocator]
-    step_group_to_token: Dict[int, Dict[int, Token]]
+    core_allocators: List[TimeAllocator]
+    core_group_step_to_token: Dict[Tuple[int, int], List[Tuple[int, Token]]]
+
+    def get_token_for_tensor(self, core: int, group: int, step: int) -> Token:
+        step_list = self.core_group_step_to_token[(core, group)]
+
+        prev_token = None
+
+        for curr_step, token in step_list:
+            # find the last token with curr_step <= step
+            if curr_step > step:
+                assert prev_token is not None
+                return prev_token
+            prev_token = token
+
+        assert prev_token is not None
+        return prev_token
 
 
-def allocate_per_core(groups: TensorGroups, steps: List[Step]) -> CoreAllocations:
-    allocators = {}
+def allocate_per_core(groups_per_core: List[TensorGroups], steps: List[Step]) -> CoreAllocations:
     curr_core_group_allocated = {}
-    step_group_to_token = {}
+    core_group_step_to_token = {}
 
-    def core_alloc(core: int):
-        if core not in allocators:
-            allocators[core] = TimeAllocator(start_time=0)
-        return allocators[core]
+    allocators = [TimeAllocator(start_time=0) for _ in range(len(groups_per_core))]
 
     for step_index, step in enumerate(steps):
         if isinstance(step, StepAddTensorToCore):
             # allocate entire group at once
-            group = groups.get_group(step.tensor)
-            key = (step.core.id, group.index)
+            core = step.core.id
+            group = groups_per_core[core].get_group(step.tensor)
+            key = (core, group.index)
 
             if key in curr_core_group_allocated:
                 alloc = curr_core_group_allocated[key]
@@ -237,37 +251,39 @@ def allocate_per_core(groups: TensorGroups, steps: List[Step]) -> CoreAllocation
                 group_size_bits = group.elem_size_bits * prod(end - start for start, end in group.loop_ranges)
                 group_size_bytes = (group_size_bits + 7) // 8
 
-                token = core_alloc(step.core.id).alloc(group_size_bytes, time=step.time_start)
+                token = allocators[core].alloc(group_size_bytes, time=step.time_start)
                 alloc = AllocatedGroup(token, len(group.keys))
 
                 curr_core_group_allocated[key] = alloc
 
-            step_group_to_token.setdefault(step_index, {})[group.index] = alloc.token
+            core_group_step_to_token.setdefault(key, []).append((step_index, alloc.token))
 
         elif isinstance(step, StepRemoveTensorFromCore):
             # subtract from group, only free if entirely clear
             # TODO theoretically we could free part of the token already, but that's not supported by the allocator yet
 
-            group = groups.get_group(step.tensor)
-            key = (step.core.id, group.index)
+            core = step.core.id
+            group = groups_per_core[core].get_group(step.tensor)
+            key = (core, group.index)
             alloc = curr_core_group_allocated[key]
 
             alloc.parts_left -= 1
             if alloc.parts_left == 0:
-                core_alloc(step.core.id).free(alloc.token, time=step.time_end)
+                allocators[core].free(alloc.token, time=step.time_end)
                 del curr_core_group_allocated[key]
 
-            step_group_to_token.setdefault(step_index, {})[group.index] = alloc.token
+            core_group_step_to_token.setdefault(key, []).append((step_index, alloc.token))
 
         elif isinstance(step, StepRunNode):
+            core = step.core.id
 
             for tensor in step.inputs:
-                group = groups.get_group(tensor)
+                # asser that operands have been allocated
+                group = groups_per_core[core].get_group(tensor)
                 key = (step.core.id, group.index)
-                alloc = curr_core_group_allocated[key]
-                step_group_to_token.setdefault(step_index, {})[group.index] = alloc.token
+                _ = curr_core_group_allocated[key]
 
         else:
             assert False, f"Unknown step type {step}"
 
-    return CoreAllocations(core_allocators=allocators, step_group_to_token=step_group_to_token)
+    return CoreAllocations(core_allocators=allocators, core_group_step_to_token=core_group_step_to_token)
