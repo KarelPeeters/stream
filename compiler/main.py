@@ -293,13 +293,70 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
         raise ValueError(f"Unrecognised equation {cn.equation}")
 
 
-# TODO decide on the strides of all full tensors beforehand instead of this hacky trick
-def visit_step(state: State, step_index: int, step: Step):
+def visit_step_transfer(state: State, step_index: int, step: StepTransferData):
     offchip_core = state.core_count
 
-    allocations = state.allocations
-    groups_per_core = state.groups_per_core
+    sender = step.sender.id
+    receiver = step.receiver.id
 
+    (offset_sender, tensor_sender) = state.tensor_for(sender, step_index, step.tensor)
+    (offset_receiver, tensor_receiver) = state.tensor_for(receiver, step_index, step.tensor)
+
+    down = sender == offchip_core
+    up = receiver == offchip_core
+
+    if not (down ^ up):
+        print(f"Warning: skipped transfer {step}")
+        comment = OperationComment(f"Warning: skipped transfer {step.tensor} {sender}->{receiver}")
+        state.push_operation(None, comment)
+        state.push_operation(sender, comment)
+        state.push_operation(receiver, comment)
+        return
+
+    assert up ^ down
+    if down:
+        core = receiver
+        offset_core, tensor_core = offset_receiver, tensor_receiver
+        offset_offchip, tensor_offchip = offset_sender, tensor_sender
+        dir_str = "down"
+    else:
+        core = sender
+        offset_core, tensor_core = offset_sender, tensor_sender
+        offset_offchip, tensor_offchip = offset_receiver, tensor_receiver
+        dir_str = "up"
+
+    # TODO support real tensors on the core too
+    tensor_core = tensor_core.simplify_for_copy()
+    assert tensor_core.rank == 1
+
+    # L3 tensor offset happens in copy_to_tensor
+    pointer_l3 = Pointer(f"(L3_DYN_START + {offset_offchip})", MemoryKind.L3)
+    pointer_l2 = Pointer(f"(L2_START_C{core} + {offset_core} + {tensor_core.offset_bytes})", MemoryKind.L2)
+    pointer_l1 = Pointer(f"(L1_START_C{core} + {offset_core} + {tensor_core.offset_bytes})", MemoryKind.L1)
+
+    # locks
+    fabric_start = state.new_lock()
+    fabric_done = state.new_lock()
+
+    # fabric operations
+    state.push_operation(None, OperationLockWait(fabric_start, 1))
+    state.push_cycles(None, "start", dir_str)
+    state.push_copy_tensor(None, pointer_l3, pointer_l2, tensor_offchip, down)
+    state.push_operation(None, OperationLockIncrement(fabric_done))
+    state.push_cycles(None, "end", dir_str)
+    state.push_operation(None, OperationPad())
+
+    # core operations
+    state.push_cycles(core, "start", dir_str)
+    state.push_operation(core, OperationLockIncrement(fabric_start))
+    state.push_operation(core, OperationLockWait(fabric_done, 1))
+    state.push_copy(core, pointer_l1, pointer_l2, tensor_core.size_bytes)
+    state.push_cycles(core, "end", dir_str)
+
+
+# TODO decide on the strides of all full tensors beforehand instead of this hacky trick
+# TODO write some visitor pattern thing for this
+def visit_step(state: State, step_index: int, step: Step):
     if isinstance(step, StepAddTensorToCore) or isinstance(step, StepRemoveTensorFromCore):
         # no code to generate, these just affect memory allocation
         pass
@@ -308,62 +365,7 @@ def visit_step(state: State, step_index: int, step: Step):
         print(
             f"step {step.time_start}..{step.time_end}: transfer data {step.tensor} from {step.sender} to {step.receiver}")
 
-        sender = step.sender.id
-        receiver = step.receiver.id
-
-        (offset_sender, tensor_sender) = state.tensor_for(sender, step_index, step.tensor)
-        (offset_receiver, tensor_receiver) = state.tensor_for(receiver, step_index, step.tensor)
-
-        down = sender == offchip_core
-        up = receiver == offchip_core
-
-        if not (down ^ up):
-            print(f"Warning: skipped transfer {step}")
-            comment = OperationComment(f"Warning: skipped transfer {step.tensor} {sender}->{receiver}")
-            state.push_operation(None, comment)
-            state.push_operation(sender, comment)
-            state.push_operation(receiver, comment)
-            return
-
-        assert up ^ down
-        if down:
-            core = receiver
-            offset_core, tensor_core = offset_receiver, tensor_receiver
-            offset_offchip, tensor_offchip = offset_sender, tensor_sender
-            dir_str = "down"
-        else:
-            core = sender
-            offset_core, tensor_core = offset_sender, tensor_sender
-            offset_offchip, tensor_offchip = offset_receiver, tensor_receiver
-            dir_str = "up"
-
-        # TODO support real tensors on the core too
-        tensor_core = tensor_core.simplify_for_copy()
-        assert tensor_core.rank == 1
-
-        # L3 tensor offset happens in copy_to_tensor
-        pointer_l3 = Pointer(f"(L3_DYN_START + {offset_offchip})", MemoryKind.L3)
-        pointer_l2 = Pointer(f"(L2_START_C{core} + {offset_core} + {tensor_core.offset_bytes})", MemoryKind.L2)
-        pointer_l1 = Pointer(f"(L1_START_C{core} + {offset_core} + {tensor_core.offset_bytes})", MemoryKind.L1)
-
-        # locks
-        fabric_start = state.new_lock()
-        fabric_done = state.new_lock()
-
-        # fabric operations
-        state.push_operation(None, OperationLockWait(fabric_start, 1))
-        state.push_cycles(None, "start", dir_str)
-        state.push_copy_tensor(None, pointer_l3, pointer_l2, tensor_offchip, down)
-        state.push_operation(None, OperationLockIncrement(fabric_done))
-        state.push_cycles(None, "end", dir_str)
-        state.push_operation(None, OperationPad())
-
-        # core operations
-        state.push_cycles(core, "start", dir_str)
-        state.push_operation(core, OperationLockIncrement(fabric_start))
-        state.push_operation(core, OperationLockWait(fabric_done, 1))
-        state.push_copy(core, pointer_l1, pointer_l2, tensor_core.size_bytes)
-        state.push_cycles(core, "end", dir_str)
+        visit_step_transfer(state, step_index, step)
 
     elif isinstance(step, StepRunNode):
 
