@@ -28,6 +28,7 @@ def schedule_graph(
 
     recording = RecordedSchedule()
     accelerator.memory_manager.recording = recording
+    accelerator.recording = recording
 
     # Initialize total link energy cost and memory energy costs
     total_cn_onchip_energy = 0

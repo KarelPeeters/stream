@@ -1,12 +1,12 @@
 import os
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 import numpy as np
 from networkx import DiGraph
 from onnx import ModelProto
 
-from compiler.core_allocation import TensorGroups, CoreAllocations
 from compiler.allocator import LinearAllocator
+from compiler.core_allocation import TensorGroups, CoreAllocations
 from compiler.data_type import array_to_bytes, DataType
 from compiler.ima_simulate import random_ima_input, random_ima_weight
 from compiler.operation import Cycles, Profile, Pointer, MemoryKind, Buffer, Operation, ProfileInfo, CyclesInfo, \
@@ -55,7 +55,34 @@ def name_to_c_upper(name: str):
 EQUATION_MATMUL = 'O[b][k]+=A[b][c]*B[c][k]'
 EQUATION_CONV = 'O[b][g][k][oy][ox]+=W[k][c][fy][fx]*I[b][g][c][iy][ix]'
 
+# the order is the dense tensor stride order
+AXES_CANDIDATES = [
+    # conv weights
+    ["K", "FY", "FX", "C"],
+    # conv IO
+    ["B", "G", "IY", "IX", "C"],
+    ["B", "G", "OY", "OX", "K"],
+    # matmul weight
+    ["C", "K"],
+]
 
+
+# TODO add the other stuff
+
+def loop_ranges_for_axes(
+        axes: List[str],
+        loop_dimensions: Tuple[str], loop_ranges: Tuple[Tuple[int, int]]
+) -> List[Tuple[int, int]]:
+    assert len(set(loop_dimensions)) == len(loop_dimensions)
+    assert set(loop_dimensions) == set(axes)
+
+    ranges = []
+    for axis in axes:
+        ranges.append(loop_ranges[loop_dimensions.index(axis)])
+    return ranges
+
+
+# TODO remove all of the buffer stuff
 class State:
     def __init__(
             self,
@@ -178,6 +205,41 @@ class State:
         )
         self.buffers[name] = buffer
         return buffer
+
+    def tensor_for(self, core: int, step: int, tensor) -> Tuple[int, Tensor]:
+        group = self.groups_per_core[core].get_group(tensor)
+        token = self.allocations.get_token_for_tensor(core, group.index, step)
+
+        if group.elem_size_bits == 4:
+            dtype = DataType.Int4
+        elif group.elem_size_bits == 8:
+            dtype = DataType.Int8
+        else:
+            raise ValueError(f"Unknown group elem size {group.elem_size_bits}")
+
+        for axes in AXES_CANDIDATES:
+            if set(axes) == set(tensor.loop_dimensions):
+                break
+        else:
+            raise ValueError(f"Unknown loop dimensions {tensor.loop_dimensions}")
+
+        assert tensor.loop_dimensions == group.loop_dimensions
+        group_ranges = loop_ranges_for_axes(axes, group.loop_dimensions, group.loop_ranges)
+        piece_ranges = loop_ranges_for_axes(axes, tensor.loop_dimensions, tensor.loop_ranges)
+
+        group_shape = [
+            group_end - group_start
+            for group_start, group_end in group_ranges
+        ]
+        group_tensor = Tensor.simple(dtype, tuple(group_shape))
+
+        piece_slices = [
+            slice(piece_start - group_start, piece_end - group_start)
+            for (group_start, _), (piece_start, piece_end) in zip(group_ranges, piece_ranges)
+        ]
+        piece_tensor = group_tensor[*piece_slices]
+
+        return token.offset, piece_tensor
 
     def push_operation(self, core: Optional[int], operation: Operation):
         if core is None:
@@ -322,7 +384,7 @@ def generate_func_init(f, state: State):
     f.writeln("i32 generated_init_cluster(int cluster_id, struct pi_device *cluster_device) {")
     with f:
         for i in range(state.core_count):
-            core_l1_size = state.tmp_size_per_core[i]
+            core_l1_size = state.allocations.core_allocators[i].allocated_size_used
             f.writeln(f"if (cluster_id == {i}) {{")
             with f:
                 f.writeln(f"L1_START_C{i} = pi_l1_malloc(cluster_device, {core_l1_size});")
@@ -434,9 +496,11 @@ def generate_data(f, state: State, d_bin):
     f.writeln()
 
     for i in range(state.core_count):
-        f.writeln(f"static PI_L2 u8 L2_START_C{i}[{state.tmp_size_per_core[i]}];")
+        core_l2_size = state.allocations.core_allocators[i].allocated_size_used
+        f.writeln(f"static PI_L2 u8 L2_START_C{i}[{core_l2_size}];")
     f.writeln()
 
+    # TODO rethink dyn and const, just put input and expected output in const and leave the rest for dyn
     f.writeln("static u32 L3_CONST_START = 0;")
     f.writeln("static u32 L3_DYN_START = 0;")
     f.writeln(f"#define L3_CONST_SIZE {len(alloc_l3_const)}")

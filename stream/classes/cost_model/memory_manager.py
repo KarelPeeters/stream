@@ -486,7 +486,7 @@ class MemoryManager:
 
         self.record(StepRemoveTensorFromCore(
             time_start=timestep, time_end=current_timestep,
-            core=core, tensor=tensor, write_offchip=should_be_written_to_offchip
+            core=core, tensor=tensor
         ))
 
         return current_timestep, total_link_energy_cost, total_memory_energy_cost

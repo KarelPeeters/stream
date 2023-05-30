@@ -5,7 +5,8 @@ from typing import Set, Any, Tuple, Dict, List
 from matplotlib import pyplot as plt
 
 from compiler.allocator import Token, TimeAllocator
-from stream.classes.cost_model.record import Step, StepAddTensorToCore, StepRemoveTensorFromCore, StepRunNode
+from stream.classes.cost_model.record import Step, StepAddTensorToCore, StepRemoveTensorFromCore, StepRunNode, \
+    StepTransferData
 
 
 @dataclass
@@ -139,6 +140,10 @@ def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
             merger_per_core[step.core.id].get_group(step.tensor, allow_new=True)
 
         elif isinstance(step, StepRemoveTensorFromCore):
+            # never remove tensors from the offchip core
+            if step.core.id == cores:
+                continue
+
             key = (step.core, step.tensor.equality_key())
 
             if key in core_tensor_lifetime:
@@ -159,10 +164,18 @@ def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
                 core_tensor_lifetime[key][1] = step.time_end
 
             merger_per_core[step.core.id].merge_matching_tensors(step.inputs)
+
+        elif isinstance(step, StepTransferData):
+            # doesn't influence group allocation
+            pass
+
         else:
             assert False, f"Unknown step type {step}"
 
         print()
+
+    # merge all tensors that are conceptually the same on the offchip core
+    merger_per_core[-1].merge_matching_tensors(list(merger_per_core[-1].key_to_tensor.values()))
 
     merged_groups_per_core = [m.finish() for m in merger_per_core]
 
@@ -282,6 +295,10 @@ def allocate_per_core(groups_per_core: List[TensorGroups], steps: List[Step]) ->
                 group = groups_per_core[core].get_group(tensor)
                 key = (step.core.id, group.index)
                 _ = curr_core_group_allocated[key]
+
+        elif isinstance(step, StepTransferData):
+            # doesn't influence allocation
+            pass
 
         else:
             assert False, f"Unknown step type {step}"

@@ -1,9 +1,11 @@
-from abc import ABC
+import bisect
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, List
 
 from zigzag.classes.hardware.architecture.core import Core
 
+from stream.classes.hardware.architecture.communication_link import CommunicationLink
 from stream.classes.workload.computation_node import ComputationNode
 from stream.classes.workload.tensor import Tensor
 
@@ -12,24 +14,49 @@ from stream.classes.workload.tensor import Tensor
 class Step(ABC):
     time_start: int
     time_end: int
-    core: Core
+
+    @abstractmethod
+    def priority(self) -> int:
+        return 0
 
 
 @dataclass(kw_only=True)
 class StepAddTensorToCore(Step):
+    core: Core
     tensor: Tensor
+
+    def priority(self) -> int:
+        return 10
 
 
 @dataclass(kw_only=True)
 class StepRemoveTensorFromCore(Step):
+    core: Core
     tensor: Tensor
-    write_offchip: bool
+
+    def priority(self) -> int:
+        return -10
+
+
+@dataclass(kw_only=True)
+class StepTransferData(Step):
+    tensor: Tensor
+    sender: Core
+    receiver: Core
+    links: List[CommunicationLink]
+
+    def priority(self) -> int:
+        return 1
 
 
 @dataclass(kw_only=True)
 class StepRunNode(Step):
+    core: Core
     node: ComputationNode
     inputs: Tuple[Tensor]
+
+    def priority(self) -> int:
+        return 0
 
 
 class RecordedSchedule:
@@ -37,4 +64,9 @@ class RecordedSchedule:
         self.steps = []
 
     def push(self, step: Step):
-        self.steps.append(step)
+        def key(s):
+            return s.time_start, -s.priority()
+
+        # insert first based on time then on priority
+        index = bisect.bisect_right(self.steps, key(step), key=key)
+        self.steps.insert(index, step)

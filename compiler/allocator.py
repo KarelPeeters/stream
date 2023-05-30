@@ -1,5 +1,5 @@
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, List, Tuple
 
 import matplotlib.pyplot as plt
@@ -80,11 +80,17 @@ class TimeAllocator:
     def __init__(self, start_time: float):
         self.check = random.randint(0, 2 ** 32)
         self.tokens = []
-        self.allocated = False
 
         self.start_time = start_time
 
+        self.allocated = False
+        self.allocated_size = None
+        self.allocated_size_used = None
+
     def alloc(self, size: int, time: float) -> Token:
+        assert int(size) == size
+        size = int(size)
+
         token = Token(self.check, len(self.tokens), size, time, None)
         self.tokens.append(token)
         return token
@@ -163,6 +169,7 @@ class TimeAllocator:
 
             history.append((t, list(free_segments)))
 
+        self.allocated_size_used = size_used
         return AllocationHistory(size, size_used, history)
 
 

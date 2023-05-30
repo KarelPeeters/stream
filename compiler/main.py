@@ -16,7 +16,8 @@ from compiler.operation import MemoryKind, Pointer, OperationMatmul, \
     OperationComment, OperationConvPadded
 from compiler.plot_profile import plot_profile
 from stream.classes.cost_model.cost_model import StreamCostModelEvaluation
-from stream.classes.cost_model.record import Step, StepRemoveTensorFromCore, StepRunNode, StepAddTensorToCore
+from stream.classes.cost_model.record import Step, StepRemoveTensorFromCore, StepRunNode, StepAddTensorToCore, \
+    StepTransferData
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.workload.computation_node import ComputationNode
 
@@ -294,34 +295,92 @@ def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvalu
 
 # TODO decide on the strides of all full tensors beforehand instead of this hacky trick
 def visit_step(state: State, step_index: int, step: Step):
-    core = step.core.id
+    offchip_core = state.core_count
 
-    if isinstance(step, StepAddTensorToCore):
-        tensor = step.tensor
+    allocations = state.allocations
+    groups_per_core = state.groups_per_core
 
-        group = state.groups_per_core[core].get_group(tensor)
-        token = state.allocations.get_token_for_tensor(core, group.index, step_index)
+    if isinstance(step, StepAddTensorToCore) or isinstance(step, StepRemoveTensorFromCore):
+        # no code to generate, these just affect memory allocation
+        pass
+    elif isinstance(step, StepTransferData):
+        # TODO support direct core<->core through L2?
+        print(
+            f"step {step.time_start}..{step.time_end}: transfer data {step.tensor} from {step.sender} to {step.receiver}")
 
-        if core == state.core_count:
-            # skip things happening to the offchip core
-            # this is either an initial placement or a core->offchip copy that has a corresponding write_offchip step
+        sender = step.sender.id
+        receiver = step.receiver.id
+
+        (offset_sender, tensor_sender) = state.tensor_for(sender, step_index, step.tensor)
+        (offset_receiver, tensor_receiver) = state.tensor_for(receiver, step_index, step.tensor)
+
+        down = sender == offchip_core
+        up = receiver == offchip_core
+
+        if not (down ^ up):
+            print(f"Warning: skipped transfer {step}")
+            comment = OperationComment(f"Warning: skipped transfer {step.tensor} {sender}->{receiver}")
+            state.push_operation(None, comment)
+            state.push_operation(sender, comment)
+            state.push_operation(receiver, comment)
             return
 
-        print(
-            f"add tensor to core {step.time_start}..{step.time_end} {core} tensor {tensor} group {group.index} token {token}")
-    elif isinstance(step, StepRemoveTensorFromCore):
-        # we only need to do something if the output has to be streamed back
-        if not step.write_offchip:
-            return
+        assert up ^ down
+        if down:
+            core = receiver
+            offset_core, tensor_core = offset_receiver, tensor_receiver
+            offset_offchip, tensor_offchip = offset_sender, tensor_sender
+            dir_str = "down"
+        else:
+            core = sender
+            offset_core, tensor_core = offset_sender, tensor_sender
+            offset_offchip, tensor_offchip = offset_receiver, tensor_receiver
+            dir_str = "up"
 
-        tensor = step.tensor
-        group = state.groups_per_core[core].get_group(tensor)
-        token = state.allocations.get_token_for_tensor(core, group.index, step_index)
+        # TODO support real tensors on the core too
+        tensor_core = tensor_core.simplify_for_copy()
+        assert tensor_core.rank == 1
 
-        print(
-            f"write tensor offchip {step.time_start}..{step.time_end} core {step.core.id} tensor {tensor} group {group.index} token {token}")
+        # L3 tensor offset happens in copy_to_tensor
+        pointer_l3 = Pointer(f"(L3_DYN_START + {offset_offchip})", MemoryKind.L3)
+        pointer_l2 = Pointer(f"(L2_START_C{core} + {offset_core} + {tensor_core.offset_bytes})", MemoryKind.L2)
+        pointer_l1 = Pointer(f"(L1_START_C{core} + {offset_core} + {tensor_core.offset_bytes})", MemoryKind.L1)
+
+        # locks
+        fabric_start = state.new_lock()
+        fabric_done = state.new_lock()
+
+        # fabric operations
+        state.push_operation(None, OperationLockWait(fabric_start, 1))
+        state.push_cycles(None, "start", dir_str)
+        state.push_copy_tensor(None, pointer_l3, pointer_l2, tensor_offchip, down)
+        state.push_operation(None, OperationLockIncrement(fabric_done))
+        state.push_cycles(None, "end", dir_str)
+        state.push_operation(None, OperationPad())
+
+        # core operations
+        state.push_cycles(core, "start", dir_str)
+        state.push_operation(core, OperationLockIncrement(fabric_start))
+        state.push_operation(core, OperationLockWait(fabric_done, 1))
+        state.push_copy(core, pointer_l1, pointer_l2, tensor_core.size_bytes)
+        state.push_cycles(core, "end", dir_str)
+
     elif isinstance(step, StepRunNode):
-        print(f"run node {step.time_start}..{step.time_end} {step.node}")
+
+        print(f"step {step.time_start}..{step.time_end}: run {step.node}")
+
+        # key_node = next(other for other in node_hw_performances.keys() if other.id[0] == cn.id[0])
+        # zcme = next(m for c, m in node_hw_performances[key_node].items() if c.id == core)
+
+        # print(f"Visiting {cn}")
+        # print(f"  incoming edge nodes: {list(a for a, _ in workload.in_edges(cn))}")
+        # print(f"  outgoing edge nodes: {list(b for _, b in workload.out_edges(cn))}")
+        # print(f"  inputs: {cn.input_names}")
+        # print(f"  outputs: {cn.output_names}")
+        # print(f"  loop_ranges: {cn.loop_ranges}")
+        # print(f"  temporal: {zcme.temporal_mapping}")
+        # print(f"  spatial: {zcme.spatial_mapping}")
+
     else:
         assert False, f"Unknown step type {step}"
 
@@ -367,34 +426,14 @@ def compile_and_run(
         simulate=simulate
     )
 
+    print("Generating code for steps")
     for (step_index, step) in enumerate(steps):
         visit_step(state, step_index, step)
 
-    return
-
-    for cn in nodes:
-        cn: ComputationNode
-        print(cn)
-
-        core = cn.core_allocation
-
-        key_node = next(other for other in node_hw_performances.keys() if other.id[0] == cn.id[0])
-        zcme = next(m for c, m in node_hw_performances[key_node].items() if c.id == core)
-
-        print(f"Visiting {cn}")
-        print(f"  incoming edge nodes: {list(a for a, _ in workload.in_edges(cn))}")
-        print(f"  outgoing edge nodes: {list(b for _, b in workload.out_edges(cn))}")
-        print(f"  inputs: {cn.input_names}")
-        print(f"  outputs: {cn.output_names}")
-        print(f"  loop_ranges: {cn.loop_ranges}")
-        print(f"  temporal: {zcme.temporal_mapping}")
-        print(f"  spatial: {zcme.spatial_mapping}")
-
-        visit_node(state, workload, cn, zcme)
-
-    print("Allocated buffers:")
-    for name, buffer in state.buffers.items():
-        print(f"  {name}: {buffer.padded_tensor} {buffer.inner_tensor}")
+    # TODO remove
+    # print("Allocated buffers:")
+    # for name, buffer in state.buffers.items():
+    #     print(f"  {name}: {buffer.padded_tensor} {buffer.inner_tensor}")
 
     print("Generating code")
     state.freeze_meta()

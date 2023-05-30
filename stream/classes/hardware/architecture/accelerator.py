@@ -4,6 +4,7 @@ import networkx as nx
 from networkx import DiGraph
 import itertools
 from stream.classes.cost_model.memory_manager import MemoryManager
+from stream.classes.cost_model.record import Step, StepTransferData
 from stream.classes.hardware.architecture.communication_link import CommunicationLink
 
 from zigzag.classes.hardware.architecture.core import Core
@@ -30,6 +31,12 @@ class Accelerator:
         self.shortest_paths = self.get_shortest_paths()
         self.pair_links = self.get_links_for_all_core_pairs()
         self.memory_manager = MemoryManager(self)
+
+        self.recording = None
+
+    def record(self, step: Step):
+        if self.recording is not None:
+            self.recording.push(step)
 
     def __str__(self) -> str:
         return f"Accelerator({self.name})"
@@ -136,6 +143,7 @@ class Accelerator:
                 0,
             )  # the "transfer" doesn't require any time
         transfer_start = max(start_timestep, links[0].available_from)
+        transfer_end = transfer_start
         for link in links:
             transfer_end, transfer_energy_cost = link.put(tensor, transfer_start)
             link_energy_cost += transfer_energy_cost
@@ -146,6 +154,16 @@ class Accelerator:
         memory_energy_cost = self.get_memory_energy_cost_of_transfer(
             tensor, sender, receiver, sender_memory_operand, receiver_memory_operand
         )
+
+        self.record(StepTransferData(
+            time_start=transfer_start,
+            time_end=transfer_end,
+            tensor=tensor,
+            sender=sender,
+            receiver=receiver,
+            links=links,
+        ))
+
         return transfer_start, transfer_end, link_energy_cost, memory_energy_cost
 
     def transfer_tensor_to_core(
@@ -272,6 +290,8 @@ class Accelerator:
 
         ## STEP 7: Give back a flag that tells us whether this transfer came from off-chip for energy tracking
         came_from_offchip = tensor_core_id == self.offchip_core_id
+
+
 
         return (
             transfer_end,
