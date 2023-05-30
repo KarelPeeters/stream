@@ -131,10 +131,10 @@ def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
         max_lifetime = max(max_lifetime, step.time_end)
 
         if isinstance(step, StepAddTensorToCore):
-            key = (step.core, step.tensor.equality_key())
+            tensor_key = (step.core, step.tensor.equality_key())
 
-            assert key not in core_tensor_lifetime
-            core_tensor_lifetime[key] = [step.time_start, None, None]
+            assert tensor_key not in core_tensor_lifetime
+            core_tensor_lifetime[tensor_key] = [step.time_start, None, None]
 
             # ensure a group is created for this tensor
             merger_per_core[step.core.id].get_group(step.tensor, allow_new=True)
@@ -144,11 +144,11 @@ def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
             if step.core.id == cores:
                 continue
 
-            key = (step.core, step.tensor.equality_key())
+            tensor_key = (step.core, step.tensor.equality_key())
 
-            if key in core_tensor_lifetime:
-                assert core_tensor_lifetime[key][2] is None
-                core_tensor_lifetime[key][2] = step.time_start
+            if tensor_key in core_tensor_lifetime:
+                assert core_tensor_lifetime[tensor_key][2] is None
+                core_tensor_lifetime[tensor_key][2] = step.time_start
             else:
                 print(f"  Warning: {step} has no matching add step")
 
@@ -160,8 +160,8 @@ def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
                 print(f"  {x}")
 
             for x in step.inputs:
-                key = (step.core, x.equality_key())
-                core_tensor_lifetime[key][1] = step.time_end
+                tensor_key = (step.core, x.equality_key())
+                core_tensor_lifetime[tensor_key][1] = step.time_end
 
             merger_per_core[step.core.id].merge_matching_tensors(step.inputs)
 
@@ -185,33 +185,45 @@ def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
         for group in groups.groups:
             print(f"    {group}")
 
-    fig, axes = plt.subplots(
-        nrows=len(core_tensor_lifetime),
-        sharex="all", squeeze=False, figsize=(32, 32)
-    )
-    axes = axes.squeeze(1)
+    # TODO move this plotting to a seprate function
+    colormap = plt.get_cmap("Set1")
+    max_group_count = max(len(m.groups) for m in merged_groups_per_core)
+    group_color = [colormap.colors[i % len(colormap.colors)] for i in range(max_group_count)]
 
-    for i, ((core, tensor), [start, last_used, end]) in enumerate(core_tensor_lifetime.items()):
-        print(f"Slice {core} {tensor} {start}..{end} last={last_used}")
+    for core_id in range(cores + 1):
+        # collect items on this core, sorted by group
+        core_groups = merged_groups_per_core[core_id]
+        core_tensors = [
+            (tensor_key, lifetime) for (other_core, tensor_key), lifetime in core_tensor_lifetime.items()
+            if other_core.id == core_id
+        ]
+        core_tensors = sorted(core_tensors, key=lambda x: core_groups.get_group(core_groups.key_to_tensor[x[0]]).index)
 
-        ax = axes[i]
-        ax.set_ylabel(f"{core.id}, {tensor}", rotation='horizontal', ha='right')
+        fig, axes = plt.subplots(
+            nrows=len(core_tensors),
+            sharex="all", squeeze=False, figsize=(32, 32)
+        )
+        axes = axes.squeeze(1)
 
-        if end is None:
-            end = max_lifetime
+        for i, (tensor_key, (start, last_used, end)) in enumerate(core_tensors):
+            tensor = core_groups.key_to_tensor[tensor_key]
+            print(f"Slice {core_id} {tensor} {start}..{end} last={last_used}")
 
-        if start is not None and end is not None:
-            if last_used is None:
-                ax.axvspan(start, end, facecolor="b", alpha=1.0)
+            ax = axes[i]
+            ax.set_ylabel(f"{core_id}, {tensor}", rotation='horizontal', ha='right')
+
+            if end is None:
+                end = max_lifetime
+
+            if start is not None and end is not None:
+                color = group_color[core_groups.get_group(tensor).index]
+                ax.axvspan(start, end, facecolor=color, alpha=1.0)
             else:
-                ax.axvspan(start, last_used, facecolor="g", alpha=1.0)
-                ax.axvspan(last_used, end, facecolor="r", alpha=1.0)
-        else:
-            print(f"Warning: {core} {tensor} has invalid lifetime {start}..{end}")
+                print(f"Warning: {core_id} {tensor} has invalid lifetime {start}..{end}")
 
-    # fig.tight_layout()
-    plt.savefig("outputs/tensor_core_life.png")
-    plt.show(block=False)
+        # fig.tight_layout()
+        plt.savefig(f"outputs/tensor_core_life_{core_id}.png")
+        plt.show(block=False)
 
     return merged_groups_per_core
 
