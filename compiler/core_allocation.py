@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from math import prod
 from typing import Set, Any, Tuple, Dict, List, Optional
@@ -229,6 +230,15 @@ def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
         ]
         core_tensors = sorted(core_tensors, key=lambda x: core_groups.get_group(core_groups.key_to_tensor[x[0]]).index)
 
+        plot_path = f"outputs/tensor_core_life_{core_id}.png"
+
+        if len(core_tensors) == 0:
+            try:
+                os.remove(plot_path)
+            except FileNotFoundError:
+                pass
+            continue
+
         fig, axes = plt.subplots(
             nrows=len(core_tensors),
             sharex="all", squeeze=False, figsize=(32, 32)
@@ -252,7 +262,7 @@ def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
                 print(f"Warning: {core_id} {tensor} has invalid lifetime {start}..{end}")
 
         # fig.tight_layout()
-        plt.savefig(f"outputs/tensor_core_life_{core_id}.png")
+        plt.savefig(plot_path)
         plt.close()
 
     return merged_groups_per_core
