@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from math import prod
-from typing import Set, Any, Tuple, Dict, List
+from typing import Set, Any, Tuple, Dict, List, Optional
 
 from matplotlib import pyplot as plt
 
@@ -12,10 +12,9 @@ from stream.classes.cost_model.record import Step, StepAddTensorToCore, StepRemo
 @dataclass
 class Group:
     index: int
-    keys: Set[Any]
     elem_size_bits: int
-    loop_dimensions: Tuple[str]
-    loop_ranges: Tuple[Tuple[int, int]]
+    tensor_keys: Set[Any]
+    loop_ranges: Dict[str, Tuple[int, int]]
 
 
 @dataclass
@@ -30,9 +29,27 @@ class TensorGroups:
         return self.groups[group]
 
 
+@dataclass
+class PartialGroup:
+    tensor_keys: Set[Any]
+    loop_ranges: Dict[str, Tuple[int, int]]
+    elem_size_bits: Optional[int]
+
+    def merge_loop_ranges(self, loop_ranges: Dict[str, Tuple[int, int]], must_match: bool):
+        if must_match:
+            assert self.loop_ranges.keys() == loop_ranges.keys()
+
+        for d in self.loop_ranges.keys():
+            if d in loop_ranges:
+                self.loop_ranges[d] = (
+                    min(self.loop_ranges[d][0], loop_ranges[d][0]),
+                    max(self.loop_ranges[d][1], loop_ranges[d][1])
+                )
+
+
 class TensorGrouper:
     def __init__(self):
-        self.groups = []
+        self.groups: List[Optional[PartialGroup]] = []
         self.key_to_group = {}
         self.key_to_tensor = {}
 
@@ -45,16 +62,29 @@ class TensorGrouper:
         else:
             assert allow_new, f"New group not allowed, tensor {tensor}"
 
+        elem_size_bits = tensor.size / prod(end - start for start, end in tensor.loop_ranges)
+        assert int(elem_size_bits) == elem_size_bits
+        elem_size_bits = int(elem_size_bits)
+
         group = len(self.groups)
-        self.groups.append({key})
+        self.groups.append(PartialGroup(
+            tensor_keys={key},
+            loop_ranges={d: r for d, r in zip(tensor.loop_dimensions, tensor.loop_ranges)},
+            elem_size_bits=elem_size_bits,
+        ))
         self.key_to_group[key] = group
         return group
 
     def merge_groups(self, x_group: int, y_group: int):
         if x_group == y_group:
-            return
+            return x_group
 
-        self.groups[x_group] |= self.groups[y_group]
+        x_partial = self.groups[x_group]
+        y_partial = self.groups[y_group]
+
+        x_partial.tensor_keys |= y_partial.tensor_keys
+        x_partial.merge_loop_ranges(y_partial.loop_ranges, must_match=True)
+
         self.groups[y_group] = None
 
         for k in self.key_to_group:
@@ -75,37 +105,20 @@ class TensorGrouper:
         groups = []
         group_map = []
 
-        for group in self.groups:
-            if group is None:
+        for partial in self.groups:
+            if partial is None:
                 group_map.append(None)
                 continue
 
             index = len(groups)
             group_map.append(index)
 
-            loop_dimensions = None
-            loop_ranges = None
-            elem_size_bits = None
-
-            for key in group:
-                tensor = self.key_to_tensor[key]
-
-                if loop_dimensions is None:
-                    loop_dimensions = tensor.loop_dimensions
-                    loop_ranges = list(tensor.loop_ranges)
-                    elem_size_bits = tensor.size / prod(end - start for start, end in tensor.loop_ranges)
-                else:
-                    assert loop_dimensions == tensor.loop_dimensions
-                    assert elem_size_bits == tensor.size / prod(end - start for start, end in tensor.loop_ranges)
-
-                    for i in range(len(loop_dimensions)):
-                        old_min, old_max = loop_ranges[i]
-                        new_min, new_max = tensor.loop_ranges[i]
-                        loop_ranges[i] = (min(old_min, new_min), max(old_max, new_max))
-
-            assert loop_dimensions is not None
-
-            groups.append(Group(index, group, elem_size_bits, loop_dimensions, tuple(loop_ranges)))
+            groups.append(Group(
+                index=index,
+                elem_size_bits=partial.elem_size_bits,
+                tensor_keys=partial.tensor_keys,
+                loop_ranges=partial.loop_ranges
+            ))
 
         # map group indices
         key_to_group = {
@@ -163,7 +176,24 @@ def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
                 tensor_key = (step.core, x.equality_key())
                 core_tensor_lifetime[tensor_key][1] = step.time_end
 
-            merger_per_core[step.core.id].merge_matching_tensors(step.inputs)
+            core_merger = merger_per_core[step.core.id]
+
+            # we only need to merge dims in which there is potential padding
+            merged_keys = [
+                ("IY", "IY"),
+                ("IX", "IX"),
+                ("IY", "OY"),
+                ("IX", "OX"),
+             ]
+            merged_ranges = {k1: step.node.loop_ranges[k0] for (k0, k1) in merged_keys if k0 in step.node.loop_ranges}
+
+            print(f"Merging in loop ranges: {merged_ranges}")
+
+            for x in step.inputs:
+                core_merger.groups[core_merger.get_group(x, allow_new=False)] \
+                    .merge_loop_ranges(merged_ranges, must_match=False)
+
+            core_merger.merge_matching_tensors(step.inputs)
 
         elif isinstance(step, StepTransferData):
             # doesn't influence group allocation
@@ -223,7 +253,7 @@ def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
 
         # fig.tight_layout()
         plt.savefig(f"outputs/tensor_core_life_{core_id}.png")
-        plt.show(block=False)
+        plt.close()
 
     return merged_groups_per_core
 
@@ -239,7 +269,7 @@ class CoreAllocations:
     core_allocators: List[TimeAllocator]
     core_group_step_to_token: Dict[Tuple[int, int], List[Tuple[int, Token]]]
 
-    def get_token_for_tensor(self, core: int, group: int, step: int) -> Token:
+    def get_token_for_group(self, core: int, group: int, step: int) -> Token:
         step_list = self.core_group_step_to_token[(core, group)]
 
         prev_token = None
@@ -273,11 +303,11 @@ def allocate_per_core(groups_per_core: List[TensorGroups], steps: List[Step]) ->
                 alloc.parts_left += 1
 
             else:
-                group_size_bits = group.elem_size_bits * prod(end - start for start, end in group.loop_ranges)
+                group_size_bits = group.elem_size_bits * prod(end - start for start, end in group.loop_ranges.values())
                 group_size_bytes = (group_size_bits + 7) // 8
 
                 token = allocators[core].alloc(group_size_bytes, time=step.time_start)
-                alloc = AllocatedGroup(token, len(group.keys))
+                alloc = AllocatedGroup(token, len(group.tensor_keys))
 
                 curr_core_group_allocated[key] = alloc
 

@@ -54,6 +54,9 @@ class StepRunNode(Step):
     core: Core
     node: ComputationNode
     inputs: Tuple[Tensor]
+    # TODO remove these and look at the CN directly again?
+    inputs_operand: Tuple[str]
+    output: Tensor
 
     def priority(self) -> int:
         return 0

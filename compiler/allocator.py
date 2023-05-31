@@ -40,7 +40,7 @@ class AllocationHistory:
     size_used: int
     history: List[Tuple[float, List[Tuple[int, int]]]]
 
-    def plot_history(self, path: Optional[str], block: bool):
+    def plot_history(self, path: Optional[str]):
         plot_size = self.size if self.size is not None else self.size_used
 
         # plot patch
@@ -71,9 +71,11 @@ class AllocationHistory:
                 ax.add_patch(
                     plt.Rectangle((time_start, prev_end), time_delta, self.size - prev_end, color='r'))
 
-        if path is not None:
+        if path is None:
+            plt.show()
+        else:
             plt.savefig(path)
-        plt.show(block=block)
+        plt.close()
 
 
 class TimeAllocator:
@@ -184,7 +186,7 @@ def main():
     # alloc.free(c)
     d = alloc.alloc(512, 20)
 
-    alloc.run_allocation(None, 30).plot_history(None, True)
+    alloc.run_allocation(None, 30).plot_history(None)
 
     for token in alloc.tokens:
         print(token)

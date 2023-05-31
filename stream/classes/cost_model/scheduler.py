@@ -285,7 +285,9 @@ def schedule_graph(
 
         recording.push(StepRunNode(
             time_start=start, time_end=end,
-            core=core, node=best_candidate, inputs=tensors_this_candidate_needs
+            core=core, node=best_candidate,
+            inputs_operand=tensors_operands, inputs=tensors_this_candidate_needs,
+            output=output_tensor,
         ))
 
         ## Step 6

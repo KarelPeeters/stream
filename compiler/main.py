@@ -4,7 +4,6 @@ import subprocess
 import numpy as np
 import onnx
 from networkx import DiGraph
-from zigzag.classes.cost_model.cost_model import CostModelEvaluation
 
 from compiler.allocator import LinearAllocator
 from compiler.codegen import generate_code, State, EQUATION_MATMUL, EQUATION_CONV
@@ -136,14 +135,12 @@ def visit_matmul(core: int, workload, cn: ComputationNode, orig_cn: ComputationN
 
 
 # TODO unify with matmul codegen
-def visit_conv(core: int, workload, cn: ComputationNode, orig_cn: ComputationNode, state: State):
-    # get inputs
-    # TODO include bias
-    input_name, weight_name, _ = cn.input_names
-    output_name, = cn.output_names
+def visit_conv(state: State, core: int, step_index: int, step: StepRunNode, orig_cn: ComputationNode):
+    cn = step.node
 
-    input = state.get_buffer(input_name)
-    weight = state.get_buffer(weight_name)
+    print("Conv")
+    print(f"  inputs: {step.inputs}")
+    print(f"  ranges: {cn.loop_ranges}")
 
     # figure out ranges
     for node in [orig_cn, cn]:
@@ -180,95 +177,49 @@ def visit_conv(core: int, workload, cn: ComputationNode, orig_cn: ComputationNod
     assert ix_start == ox_start - 1
     assert ix_end == ox_end + 1
 
-    comment = f"conv b={b_start}..{b_end}, k={k_start}..{k_end}, c={c_start}..{c_end} ox={ox_start}..{ox_end} oy={oy_start}..{oy_end}"
-    state.push_operation(core, OperationComment(comment))
+    assert c_start == c_zero and c_end == c_full, "Partial output accumulation not supported yet"
 
-    # get full output buffer
-    output = state.define_buffer(
-        name=output_name, dtype=DataType.Int8,
-        inner_shape=(b_full, oy_full, ox_full, k_full),
-        padding=((0, 0), (1, 1), (1, 1), (0, 0)),
-        const=False,
-        allow_existing=True
+    # get input groups
+    group_per_operand = {}
+    for operand, input in zip(step.inputs_operand, step.inputs):
+        group = state.groups_per_core[core].get_group(input)
+        if operand in group_per_operand:
+            assert group_per_operand[operand] == group
+        else:
+            group_per_operand[operand] = group
+
+    assert group_per_operand.keys() == {"I1", "I2"}
+
+    input_group = group_per_operand["I1"]
+    input_place = state.placement_for_group_range(
+        core, step_index, input_group,
+        {"B": (b_start, b_end), "G": (0, 1), "C": (c_start, c_end), "IY": (iy_start, iy_end), "IX": (ix_start, ix_end)}
     )
 
-    full_input = input.padded_tensor
-    full_weight = weight.padded_tensor
-    full_output = output.inner_tensor
+    weight_group = group_per_operand["I2"]
+    weight_place = state.placement_for_group_range(
+        core, step_index, weight_group,
+        {"K": (k_start, k_end), "C": (c_start, c_end), "FY": (0, 3), "FX": (0, 3)}
+    )
 
-    # everything is transposed, careful
-    piece_input = full_input[b_start:b_end, 1 + iy_start:1 + iy_end, 1 + ix_start:1 + ix_end, c_start:c_end]
-    piece_weight = full_weight[:, :, c_start:c_end, k_start:k_end]
-    piece_output = full_output[b_start:b_end, oy_start:oy_end, ox_start:ox_end, k_start:k_end]
+    output_place = state.placement_for_tensor(core, step_index, step.output)
 
-    # allocate temporary buffers
-    tmp_alloc = LinearAllocator()
-    tmp_input = tmp_alloc.alloc(piece_input.size_bytes)
-    tmp_weight = tmp_alloc.alloc(piece_weight.size_bytes)
-    tmp_output = tmp_alloc.alloc(piece_output.size_bytes)
-
-    # allocate space for temporary buffers in L1 and L2
-    state.tmp_size_per_core[core] = max(len(tmp_alloc), state.tmp_size_per_core[core])
-
-    # wait for dependencies (this automatically handles the split input case)
-    state.push_cycles(core, "start", "wait")
-    for (prev, _) in workload.in_edges(cn):
-        state.push_operation(core, OperationLockWait(state.get_cn_lock(prev), 1))
-    state.push_cycles(core, "end", "wait")
-
-    start_l1 = Pointer(f"L1_START_C{core}", MemoryKind.L1)
-    start_l2 = Pointer(f"L2_START_C{core}", MemoryKind.L2)
-
-    # fabric operations
-    fabric_in_start = state.new_lock()
-    fabric_in_done = state.new_lock()
-    fabric_out_start = state.new_lock()
-    fabric_out_done = state.new_lock()
-
-    state.push_operation(None, OperationLockWait(fabric_in_start, 1))
-    state.push_cycles(None, "start", "down")
-    state.push_copy_tensor(None, input.pointer_l3, start_l2.offset(tmp_input), piece_input, True)
-    state.push_copy_tensor(None, weight.pointer_l3, start_l2.offset(tmp_weight), piece_weight, True)
-    state.push_operation(None, OperationLockIncrement(fabric_in_done))
-    state.push_cycles(None, "end", "down")
-    state.push_operation(None, OperationPad())
-
-    state.push_operation(None, OperationLockWait(fabric_out_start, 1))
-    state.push_cycles(None, "start", "up")
-    state.push_copy_tensor(None, output.pointer_l3, start_l2.offset(tmp_output), piece_output, False)
-    state.push_operation(None, OperationLockIncrement(fabric_out_done))
-    state.push_cycles(None, "end", "up")
-    state.push_operation(None, OperationPad())
-
-    # copy inputs
-    state.push_cycles(core, "start", "input")
-    state.push_operation(core, OperationLockIncrement(fabric_in_start))
-    state.push_operation(core, OperationLockWait(fabric_in_done, 1))
-    state.push_copy(core, start_l1.offset(tmp_input), start_l2.offset(tmp_input), piece_input.size_bytes)
-    state.push_copy(core, start_l1.offset(tmp_weight), start_l2.offset(tmp_weight), piece_weight.size_bytes)
-    state.push_cycles(core, "end", "input")
-
-    # real operation
     state.push_cycles(core, "start", "calc")
     state.push_operation(core, OperationConvPadded(
         b=(b_end - b_start), k=(k_end - k_start), c=(c_end - c_start),
         oh=(oy_end - oy_start), ow=(ox_end - ox_start),
         fh=3, fw=3,
-        weight=start_l1.offset(tmp_weight), input=start_l1.offset(tmp_input), output=start_l1.offset(tmp_output),
+        input=input_place.offset(state.l1_start_core[core]),
+        weight=weight_place.offset(state.l1_start_core[core]),
+        output=output_place.offset(state.l1_start_core[core]),
         profile=state.new_profile(ProfileInfo(core=f"ima_core_{core}", name="conv")),
     ))
     state.push_cycles(core, "end", "calc")
 
-    # copy output
-    state.push_cycles(core, "start", "output")
-    state.push_copy(core, start_l2.offset(tmp_output), start_l1.offset(tmp_output), piece_output.size_bytes)
-    state.push_operation(core, OperationLockIncrement(fabric_out_start))
-    state.push_operation(core, OperationLockWait(fabric_out_done, 1))
-    state.push_operation(core, OperationLockIncrement(state.get_cn_lock(cn)))
-    state.push_cycles(core, "end", "output")
+    # TODO double check if conv is implemented correctly
+    return
 
-    state.push_operation(core, OperationPad())
-
+    # TODO simulation
     if state.simulate and output.inner_simulated is None:
         # (h w c k) -> (k c h w)
         weight_trans = weight.inner_simulated.transpose([3, 2, 0, 1])
@@ -281,26 +232,14 @@ def visit_conv(core: int, workload, cn: ComputationNode, orig_cn: ComputationNod
         output.inner_simulated = output_trans.transpose([0, 2, 3, 1])
 
 
-def visit_node(state: State, workload, cn: ComputationNode, zcme: CostModelEvaluation):
-    core = cn.get_core_allocation()
-    orig_cn = cn.original_node if cn.original_node is not None else cn
-
-    if cn.equation == EQUATION_MATMUL:
-        visit_matmul(core, workload, cn, orig_cn, state)
-    elif cn.equation == EQUATION_CONV:
-        visit_conv(core, workload, cn, orig_cn, state)
-    else:
-        raise ValueError(f"Unrecognised equation {cn.equation}")
-
-
 def visit_step_transfer(state: State, step_index: int, step: StepTransferData):
     offchip_core = state.core_count
 
     sender = step.sender.id
     receiver = step.receiver.id
 
-    (offset_sender, tensor_sender) = state.tensor_for(sender, step_index, step.tensor)
-    (offset_receiver, tensor_receiver) = state.tensor_for(receiver, step_index, step.tensor)
+    placement_sender = state.placement_for_tensor(sender, step_index, step.tensor)
+    placement_receiver = state.placement_for_tensor(receiver, step_index, step.tensor)
 
     down = sender == offchip_core
     up = receiver == offchip_core
@@ -316,23 +255,23 @@ def visit_step_transfer(state: State, step_index: int, step: StepTransferData):
     assert up ^ down
     if down:
         core = receiver
-        offset_core, tensor_core = offset_receiver, tensor_receiver
-        offset_offchip, tensor_offchip = offset_sender, tensor_sender
+        placement_core = placement_receiver
+        placement_offchip = placement_sender
         dir_str = "down"
     else:
         core = sender
-        offset_core, tensor_core = offset_sender, tensor_sender
-        offset_offchip, tensor_offchip = offset_receiver, tensor_receiver
+        placement_core = placement_sender
+        placement_offchip = placement_receiver
         dir_str = "up"
 
     # TODO support real tensors on the core too
-    tensor_core = tensor_core.simplify_for_copy()
+    tensor_core = placement_core.tensor.simplify_for_copy()
     assert tensor_core.rank == 1
 
     # L3 tensor offset happens in copy_to_tensor
-    pointer_l3 = Pointer(f"(L3_DYN_START + {offset_offchip})", MemoryKind.L3)
-    pointer_l2 = Pointer(f"(L2_START_C{core} + {offset_core} + {tensor_core.offset_bytes})", MemoryKind.L2)
-    pointer_l1 = Pointer(f"(L1_START_C{core} + {offset_core} + {tensor_core.offset_bytes})", MemoryKind.L1)
+    pointer_l3 = state.l3_start.offset(placement_offchip.offset_core)
+    pointer_l2 = placement_core.offset(state.l2_start_core[core])
+    pointer_l1 = placement_core.offset(state.l1_start_core[core])
 
     # locks
     fabric_start = state.new_lock()
@@ -341,7 +280,7 @@ def visit_step_transfer(state: State, step_index: int, step: StepTransferData):
     # fabric operations
     state.push_operation(None, OperationLockWait(fabric_start, 1))
     state.push_cycles(None, "start", dir_str)
-    state.push_copy_tensor(None, pointer_l3, pointer_l2, tensor_offchip, down)
+    state.push_copy_tensor(None, pointer_l3, pointer_l2, placement_offchip.tensor, down)
     state.push_operation(None, OperationLockIncrement(fabric_done))
     state.push_cycles(None, "end", dir_str)
     state.push_operation(None, OperationPad())
@@ -354,6 +293,22 @@ def visit_step_transfer(state: State, step_index: int, step: StepTransferData):
     state.push_cycles(core, "end", dir_str)
 
 
+def visit_step_run_node(state: State, step_index: int, step: StepRunNode):
+    core = step.core.id
+    cn = step.node
+
+    orig_cn = cn.original_node if cn.original_node is not None else cn
+
+    if cn.equation == EQUATION_MATMUL:
+        # TODO fix visit_matmul
+        # visit_matmul(core, cn, orig_cn, state)
+        pass
+    elif cn.equation == EQUATION_CONV:
+        visit_conv(state, core, step_index, step, orig_cn)
+    else:
+        raise ValueError(f"Unrecognised equation {cn.equation}")
+
+
 # TODO decide on the strides of all full tensors beforehand instead of this hacky trick
 # TODO write some visitor pattern thing for this
 def visit_step(state: State, step_index: int, step: Step):
@@ -363,13 +318,14 @@ def visit_step(state: State, step_index: int, step: Step):
     elif isinstance(step, StepTransferData):
         # TODO support direct core<->core through L2?
         print(
-            f"step {step.time_start}..{step.time_end}: transfer data {step.tensor} from {step.sender} to {step.receiver}")
+            f"step {step.time_start}..{step.time_end}: transfer data {step.tensor} from {step.sender} to {step.receiver}"
+        )
 
         visit_step_transfer(state, step_index, step)
 
     elif isinstance(step, StepRunNode):
-
         print(f"step {step.time_start}..{step.time_end}: run {step.node}")
+        visit_step_run_node(state, step_index, step)
 
         # key_node = next(other for other in node_hw_performances.keys() if other.id[0] == cn.id[0])
         # zcme = next(m for c, m in node_hw_performances[key_node].items() if c.id == core)
@@ -418,7 +374,7 @@ def compile_and_run(
         size = None if core == cluster_cores else l1_size
         print(f"Allocating for core {core} with size {size}")
         history = allocator.run_allocation(size, final_time)
-        history.plot_history(f"outputs/alloc_core_{core}.png", False)
+        history.plot_history(f"outputs/alloc_core_{core}.png")
 
     # TODO onnx is probably not necessary any more
     state = State(

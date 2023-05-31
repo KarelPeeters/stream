@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass
 from typing import Optional, Dict, List, Tuple
 
 import numpy as np
@@ -6,7 +7,7 @@ from networkx import DiGraph
 from onnx import ModelProto
 
 from compiler.allocator import LinearAllocator
-from compiler.core_allocation import TensorGroups, CoreAllocations
+from compiler.core_allocation import TensorGroups, CoreAllocations, Group
 from compiler.data_type import array_to_bytes, DataType
 from compiler.ima_simulate import random_ima_input, random_ima_weight
 from compiler.operation import Cycles, Profile, Pointer, MemoryKind, Buffer, Operation, ProfileInfo, CyclesInfo, \
@@ -56,30 +57,55 @@ EQUATION_MATMUL = 'O[b][k]+=A[b][c]*B[c][k]'
 EQUATION_CONV = 'O[b][g][k][oy][ox]+=W[k][c][fy][fx]*I[b][g][c][iy][ix]'
 
 # the order is the dense tensor stride order
-AXES_CANDIDATES = [
+# TODO add the other stuff
+AXES_CANDIDATES_ORDERED = [
     # conv weights
-    ["K", "FY", "FX", "C"],
+    ("K", "FY", "FX", "C"),
     # conv IO
-    ["B", "G", "IY", "IX", "C"],
-    ["B", "G", "OY", "OX", "K"],
+    ("B", "G", "IY", "IX", "C"),
+    ("B", "G", "OY", "OX", "K"),
     # matmul weight
-    ["C", "K"],
+    ("C", "K"),
 ]
 
 
-# TODO add the other stuff
+@dataclass
+class TensorPlacement:
+    offset_core: int
+    tensor: Tensor
+
+    # get a pointer that contains both offsets
+    def offset(self, pointer: Pointer) -> Pointer:
+        return pointer.offset(self.offset_core).offset(self.tensor.offset_bytes)
+
 
 def loop_ranges_for_axes(
-        axes: List[str],
-        loop_dimensions: Tuple[str], loop_ranges: Tuple[Tuple[int, int]]
+        axes: Tuple[str, ...],
+        loop_ranges: Dict[str, Tuple[int, int]],
 ) -> List[Tuple[int, int]]:
-    assert len(set(loop_dimensions)) == len(loop_dimensions)
-    assert set(loop_dimensions) == set(axes)
+    assert loop_ranges.keys() == set(axes)
 
     ranges = []
-    for axis in axes:
-        ranges.append(loop_ranges[loop_dimensions.index(axis)])
+    for d in axes:
+        ranges.append(loop_ranges[d])
     return ranges
+
+
+def maybe_normalize_conv_axes(
+        axes: Dict[str, Tuple[int, int]],
+        to: Dict[str, Tuple[int, int]]
+) -> Dict[str, Tuple[int, int]]:
+    output = ["B", "G", "K", "OY", "OX"]
+    input = ["B", "G", "C", "IY", "IX"]
+
+    if axes.keys() == set(output) and to.keys() == set(input):
+        # convert output to input
+        return {input[output.index(d)]: r for d, r in axes.items()}
+    if axes.keys() == set(input) and to.keys() == set(output):
+        # convert input to output
+        return {output[input.index(d)]: r for d, r in axes.items()}
+
+    return axes
 
 
 # TODO remove all of the buffer stuff
@@ -110,6 +136,10 @@ class State:
         self.profile_infos: List[ProfileInfo] = []
         self.cycle_infos: List[CyclesInfo] = []
         self.meta_frozen = False
+
+        self.l3_start = Pointer("L3_DYN_START", MemoryKind.L3)
+        self.l2_start_core = [Pointer(f"L2_START_C{i}", MemoryKind.L2) for i in range(core_count)]
+        self.l1_start_core = [Pointer(f"L1_START_C{i}", MemoryKind.L1) for i in range(core_count)]
 
         # define inputs and constants
         for input in onnx_model.graph.input:
@@ -206,9 +236,17 @@ class State:
         self.buffers[name] = buffer
         return buffer
 
-    def tensor_for(self, core: int, step: int, tensor) -> Tuple[int, Tensor]:
+    def placement_for_tensor(self, core: int, step: int, tensor) -> TensorPlacement:
         group = self.groups_per_core[core].get_group(tensor)
-        token = self.allocations.get_token_for_tensor(core, group.index, step)
+        loop_ranges = {d: r for d, r in zip(tensor.loop_dimensions, tensor.loop_ranges)}
+        return self.placement_for_group_range(core, step, group, loop_ranges)
+
+    def placement_for_group_range(
+            self,
+            core: int, step: int, group: Group,
+            loop_ranges: Dict[str, Tuple[int, int]],
+    ) -> TensorPlacement:
+        token = self.allocations.get_token_for_group(core, group.index, step)
 
         if group.elem_size_bits == 4:
             dtype = DataType.Int4
@@ -217,15 +255,19 @@ class State:
         else:
             raise ValueError(f"Unknown group elem size {group.elem_size_bits}")
 
-        for axes in AXES_CANDIDATES:
-            if set(axes) == set(tensor.loop_dimensions):
+        loop_ranges = maybe_normalize_conv_axes(loop_ranges, group.loop_ranges)
+
+        for axes in AXES_CANDIDATES_ORDERED:
+            if set(axes) == loop_ranges.keys():
                 break
         else:
-            raise ValueError(f"Unknown loop dimensions {tensor.loop_dimensions}")
+            raise ValueError(f"Unknown loop dimensions {loop_ranges}")
 
-        assert tensor.loop_dimensions == group.loop_dimensions
-        group_ranges = loop_ranges_for_axes(axes, group.loop_dimensions, group.loop_ranges)
-        piece_ranges = loop_ranges_for_axes(axes, tensor.loop_dimensions, tensor.loop_ranges)
+        assert loop_ranges.keys() == group.loop_ranges.keys(), \
+            f"Loop dim mismatch between tensor and group: {loop_ranges} vs {group.loop_ranges}"
+
+        group_ranges = loop_ranges_for_axes(axes, group.loop_ranges)
+        piece_ranges = loop_ranges_for_axes(axes, loop_ranges)
 
         group_shape = [
             group_end - group_start
@@ -239,7 +281,10 @@ class State:
         ]
         piece_tensor = group_tensor[*piece_slices]
 
-        return token.offset, piece_tensor
+        return TensorPlacement(
+            offset_core=token.offset,
+            tensor=piece_tensor,
+        )
 
     def push_operation(self, core: Optional[int], operation: Operation):
         if core is None:
@@ -491,6 +536,7 @@ def generate_data(f, state: State, d_bin):
 
     f.writeln()
 
+    # TODO is this correct? is it necessary to store L1 in L1 and L2 in L2?
     for i in range(state.core_count):
         f.writeln(f"static PI_L1 u8 *L1_START_C{i} = NULL;")
     f.writeln()
