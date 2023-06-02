@@ -59,7 +59,7 @@ EQUATION_CONV = 'O[b][g][k][oy][ox]+=W[k][c][fy][fx]*I[b][g][c][iy][ix]'
 # TODO add the other stuff
 AXES_CANDIDATES_ORDERED = [
     # conv weights
-    ("K", "FY", "FX", "C"),
+    ("FY", "FX", "C", "K"),
     # conv IO
     ("B", "G", "IY", "IX", "C"),
     ("B", "G", "OY", "OX", "K"),
@@ -138,7 +138,7 @@ def init_onnx_constants(onnx_model) -> Dict[str, Any]:
         elif len(onnx_shape) == 4:
             # conv weight
             k, c, h, w = onnx_shape
-            shape = c, h, w, k
+            shape = h, w, c, k
         else:
             raise KeyError(f"Unexpected weight rank {len(onnx_shape)}")
 

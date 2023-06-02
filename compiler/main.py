@@ -225,8 +225,8 @@ def visit_conv(state: State, core: int, step_index: int, step: StepRunNode, orig
 
         # b, g, h, w, c -> b, c, h, w
         input_const = input_const_trans.transpose([0, 1, 4, 2, 3]).squeeze(1)
-        # c, h, w, k -> k, c, h, w
-        weight_const = weight_const_trans.transpose([3, 0, 1, 2])
+        # h, w, c, k -> k, c, h, w
+        weight_const = weight_const_trans.transpose([3, 2, 0, 1])
 
         output_const = ima_conv(input_const, weight_const)
 
