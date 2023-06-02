@@ -7,7 +7,7 @@ from networkx import DiGraph
 
 from compiler.allocator import LinearAllocator
 from compiler.codegen import generate_code, State, EQUATION_MATMUL, EQUATION_CONV
-from compiler.core_allocation import collect_tensor_groups, allocate_per_core
+from compiler.core_allocation import collect_tensor_groups, allocate_per_core, tensor_value_name
 from compiler.data_type import DataType
 from compiler.ima_simulate import ima_matmul, ima_conv
 from compiler.operation import MemoryKind, Pointer, OperationMatmul, \
@@ -22,6 +22,8 @@ from stream.classes.workload.computation_node import ComputationNode
 
 
 def visit_matmul(core: int, workload, cn: ComputationNode, orig_cn: ComputationNode, state: State):
+    raise NotImplementedError("TODO: implement matmul again")
+
     # get inputs
     # TODO use bias
     input_name, weight_name, _ = cn.input_names
@@ -209,27 +211,29 @@ def visit_conv(state: State, core: int, step_index: int, step: StepRunNode, orig
         b=(b_end - b_start), k=(k_end - k_start), c=(c_end - c_start),
         oh=(oy_end - oy_start), ow=(ox_end - ox_start),
         fh=3, fw=3,
-        input=input_place.offset(state.l1_start_core[core]),
-        weight=weight_place.offset(state.l1_start_core[core]),
-        output=output_place.offset(state.l1_start_core[core]),
+        input=input_place.offset(state.l1_base_core[core]),
+        weight=weight_place.offset(state.l1_base_core[core]),
+        output=output_place.offset(state.l1_base_core[core]),
         profile=state.new_profile(ProfileInfo(core=f"ima_core_{core}", name="conv")),
     ))
     state.push_cycles(core, "end", "calc")
 
-    # TODO double check if conv is implemented correctly
-    return
+    # simulate
+    if state.should_simulate(node.output_names[0]):
+        input_const_trans = state.get_simulation_value(node.input_names[0])
+        weight_const_trans = state.get_simulation_value(node.input_names[1])
 
-    # TODO simulation
-    if state.simulate and output.inner_simulated is None:
-        # (h w c k) -> (k c h w)
-        weight_trans = weight.inner_simulated.transpose([3, 2, 0, 1])
-        # (b h w c) -> (b c h w)
-        input_trans = input.inner_simulated.transpose([0, 3, 1, 2])
+        # b, g, h, w, c -> b, c, h, w
+        input_const = input_const_trans.transpose([0, 1, 4, 2, 3]).squeeze(1)
+        # c, h, w, k -> k, c, h, w
+        weight_const = weight_const_trans.transpose([3, 0, 1, 2])
 
-        output_trans = ima_conv(input_trans, weight_trans)
+        output_const = ima_conv(input_const, weight_const)
 
-        # (b k h w) -> (b h w k)
-        output.inner_simulated = output_trans.transpose([0, 2, 3, 1])
+        # b, c, h, w -> b, 1, h, w, c
+        output_const_trans = np.expand_dims(output_const.transpose([0, 2, 3, 1]), 1)
+
+        state.set_simulation_value(node.output_names[0], output_const_trans)
 
 
 def visit_step_transfer(state: State, step_index: int, step: StepTransferData):
@@ -269,9 +273,9 @@ def visit_step_transfer(state: State, step_index: int, step: StepTransferData):
     assert tensor_core.rank == 1
 
     # L3 tensor offset happens in copy_to_tensor
-    pointer_l3 = state.l3_start.offset(placement_offchip.offset_core)
-    pointer_l2 = placement_core.offset(state.l2_start_core[core])
-    pointer_l1 = placement_core.offset(state.l1_start_core[core])
+    pointer_l3 = state.l3_base.offset(placement_offchip.offset_core)
+    pointer_l2 = placement_core.offset(state.l2_base_core[core])
+    pointer_l1 = placement_core.offset(state.l1_base_core[core])
 
     # locks
     fabric_start = state.new_lock()
@@ -381,7 +385,7 @@ def compile_and_run(
         core_count=cluster_cores,
         onnx_model=onnx_model, workload=workload,
         groups_per_core=groups_per_core, allocations=allocations,
-        simulate=simulate
+        simulate=simulate,
     )
 
     print("Generating code for steps")

@@ -1,16 +1,15 @@
 import os
 from dataclasses import dataclass
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any
 
 import numpy as np
 from networkx import DiGraph
 from onnx import ModelProto
 
-from compiler.allocator import LinearAllocator
 from compiler.core_allocation import TensorGroups, CoreAllocations, Group
-from compiler.data_type import array_to_bytes, DataType
+from compiler.data_type import DataType, array_to_bytes
 from compiler.ima_simulate import random_ima_input, random_ima_weight
-from compiler.operation import Cycles, Profile, Pointer, MemoryKind, Buffer, Operation, ProfileInfo, CyclesInfo, \
+from compiler.operation import Cycles, Profile, Pointer, MemoryKind, Operation, ProfileInfo, CyclesInfo, \
     OperationRecordCycles, OperationCopy, Tensor, OperationCopy2D, OperationCopy3D, Lock
 from stream.classes.workload.computation_node import ComputationNode
 
@@ -108,6 +107,46 @@ def maybe_normalize_conv_axes(
     return axes
 
 
+def init_onnx_constants(onnx_model) -> Dict[str, Any]:
+    constants = {}
+
+    # define inputs and constants
+    for input in onnx_model.graph.input:
+        onnx_shape = tuple(d.dim_value for d in list(input.type.tensor_type.shape.dim))
+
+        if len(onnx_shape) == 4:
+            # conv input, transpose and add group dim
+            b, c, h, w = onnx_shape
+            shape = b, 1, h, w, c
+        else:
+            # matmul input?
+            shape = onnx_shape
+
+        constants[input.name] = random_ima_input(shape)
+
+    for const in onnx_model.graph.initializer:
+        onnx_shape = tuple(const.dims)
+
+        # special case weight ranks
+        if len(onnx_shape) == 1:
+            # skip biases for now
+            continue
+        if len(onnx_shape) == 2:
+            # matmul weight
+            k, c = onnx_shape
+            shape = c, k
+        elif len(onnx_shape) == 4:
+            # conv weight
+            k, c, h, w = onnx_shape
+            shape = c, h, w, k
+        else:
+            raise KeyError(f"Unexpected weight rank {len(onnx_shape)}")
+
+        constants[const.name] = random_ima_weight(shape)
+
+    return constants
+
+
 # TODO remove all of the buffer stuff
 class State:
     def __init__(
@@ -115,7 +154,7 @@ class State:
             core_count: int,
             onnx_model: ModelProto, workload: DiGraph,
             groups_per_core: List[TensorGroups], allocations: CoreAllocations,
-            simulate: bool
+            simulate: bool,
     ):
         self.onnx_model = onnx_model
         self.workload = workload
@@ -123,7 +162,6 @@ class State:
         self.groups_per_core = groups_per_core
         self.allocations = allocations
 
-        self.buffers: Dict[str, Buffer] = {}
         self.core_count = core_count
 
         self.operations_per_core: List[List[Operation]] = [[] for _ in range(core_count)]
@@ -137,104 +175,12 @@ class State:
         self.cycle_infos: List[CyclesInfo] = []
         self.meta_frozen = False
 
-        self.l3_start = Pointer("L3_DYN_START", MemoryKind.L3)
-        self.l2_start_core = [Pointer(f"L2_START_C{i}", MemoryKind.L2) for i in range(core_count)]
-        self.l1_start_core = [Pointer(f"L1_START_C{i}", MemoryKind.L1) for i in range(core_count)]
+        self.l3_base = Pointer("L3_BASE", MemoryKind.L3)
+        self.l2_base_core = [Pointer(f"L2_BASE_C{i}", MemoryKind.L2) for i in range(core_count)]
+        self.l1_base_core = [Pointer(f"L1_BASE_C{i}", MemoryKind.L1) for i in range(core_count)]
 
-        # define inputs and constants
-        for input in onnx_model.graph.input:
-            shape = tuple(d.dim_value for d in list(input.type.tensor_type.shape.dim))
-
-            used_as_conv_input = False
-            for cn in self.workload:
-                if cn.equation == EQUATION_CONV:
-                    if cn.input_names[0] == input.name:
-                        used_as_conv_input = True
-                        break
-
-            if used_as_conv_input:
-                assert len(shape) == 4, f"Conv input must be 4D, got shape {shape}"
-                b, c, h, w = shape
-                inner_shape = b, h, w, c
-                padding = ((0, 0), (1, 1), (1, 1), (0, 0))
-            else:
-                inner_shape = shape
-                padding = None
-
-            buffer = self.define_buffer(
-                name=input.name, dtype=DataType.Int8,
-                inner_shape=inner_shape, padding=padding,
-                const=True
-            )
-
-            buffer.input = True
-            buffer.inner_simulated = random_ima_input(inner_shape)
-
-        for const in onnx_model.graph.initializer:
-            onnx_shape = tuple(const.dims)
-
-            # special case weight ranks
-            if len(onnx_shape) == 1:
-                # skip biases for now
-                continue
-            if len(onnx_shape) == 2:
-                k, c = onnx_shape
-                shape = c, k
-            elif len(onnx_shape) == 4:
-                k, c, h, w = onnx_shape
-                shape = h, w, c, k
-            else:
-                raise KeyError(f"Unexpected weight rank {len(onnx_shape)}")
-
-            buffer = self.define_buffer(name=const.name, dtype=DataType.Int4, inner_shape=shape, padding=None,
-                                        const=True)
-            buffer.const = True
-            buffer.inner_simulated = random_ima_weight(shape)
-
-    def get_buffer(self, name):
-        return self.buffers[name]
-
-    # TODO switch to values instead of buffers
-    # def define_value(self, name: str, dtype: DataType, shape: tuple[int], transposed: bool, allow_existing: bool, expected_data: np.array):
-    #     pass
-
-    def define_buffer(
-            self,
-            name,
-            dtype: DataType,
-            inner_shape: tuple,
-            padding: Optional[tuple],
-            const: bool,
-            allow_existing: bool = False
-    ) -> Buffer:
-        if name in self.buffers:
-            if allow_existing:
-                # TODO assert that properties match?
-                return self.buffers[name]
-
-            raise KeyError(f"Buffer {name} already defined")
-
-        upper = name_to_c_upper(name)
-
-        print(
-            f"Defining buffer {name} {upper} dtype={dtype}, inner_shape={inner_shape}, padding={padding}, const={const}")
-
-        if const:
-            pointer_l3 = Pointer(f"(L3_CONST_START + L3_CONST_OFFSET_{upper})", MemoryKind.L3)
-        else:
-            pointer_l3 = Pointer(f"(L3_DYN_START + L3_DYN_OFFSET_{upper})", MemoryKind.L3)
-
-        if padding is None:
-            padding = tuple([(0, 0)] * len(inner_shape))
-
-        buffer = Buffer(
-            dtype=dtype,
-            inner_shape=inner_shape,
-            padding=padding,
-            pointer_l3=pointer_l3,
-        )
-        self.buffers[name] = buffer
-        return buffer
+        self.simulated_constants = init_onnx_constants(onnx_model)
+        self.simulated_values = {}
 
     def placement_for_tensor(self, core: int, step: int, tensor) -> TensorPlacement:
         group = self.groups_per_core[core].get_group(tensor)
@@ -351,6 +297,25 @@ class State:
         else:
             raise NotImplementedError(f"Copy for tensor rank {tensor.rank}")
 
+    def should_simulate(self, value_name: str) -> bool:
+        return self.simulate and value_name not in self.simulated_values
+
+    def get_simulation_value(self, name: str):
+        assert not (name in self.simulated_constants and name in self.simulated_values)
+
+        if name in self.simulated_constants:
+            return self.simulated_constants[name]
+
+        if name in self.simulated_values:
+            return self.simulated_values[name]
+
+        return None
+
+    def set_simulation_value(self, name: str, value):
+        assert name not in self.simulated_constants
+        assert name not in self.simulated_values
+        self.simulated_values[name] = value
+
     # TODO reduce code duplication here
     def new_lock(self) -> Lock:
         assert not self.meta_frozen
@@ -392,7 +357,9 @@ def generate_meta(f, state: State):
 
 
 def generate_func_init(f, state: State):
-    f.writeln("i32 generated_init_fabric(struct pi_device *ram_param, u32 l3_const_start, u32 l3_const_file_size) {")
+    f.writeln("i32 generated_init_fabric(struct pi_device *ram_param, u32 l3_file_start, u32 l3_file_size) {")
+
+    # TODO initialize ram with inputs
 
     with f:
         # TODO re-enable once we can get this synchronized
@@ -401,22 +368,24 @@ def generate_func_init(f, state: State):
         f.writeln("ram = ram_param;")
         f.writeln()
 
-        f.writeln("if (l3_const_file_size != L3_CONST_SIZE) {")
+        f.writeln("if (l3_file_size != L3_SIZE*2) {")
         with f:
-            f.writeln("printf(\"ERROR: L3 const size mismatch\\n\");")
+            f.writeln("printf(\"ERROR: L3 file size mismatch\\n\");")
             f.writeln("return -1;")
         f.writeln("}")
         f.writeln()
 
-        f.writeln("L3_CONST_START = l3_const_start;")
-        f.writeln("if (pi_ram_alloc(ram_param, &L3_DYN_START, L3_DYN_SIZE)) {")
+        f.writeln("L3_BASE_INIT = l3_file_start;")
+        f.writeln("L3_BASE_FINAL = l3_file_start + L3_SIZE;")
+        f.writeln()
+        f.writeln("if (pi_ram_alloc(ram_param, &L3_BASE, L3_SIZE)) {")
         with f:
             f.writeln("printf(\"ERROR: Failed to allocate L3_DYN\\n\");")
             f.writeln("return -2;")
         f.writeln("}")
         f.writeln()
-        # clear ram to set padding and to make debugging easier
-        f.writeln("pi_ram_clear(ram_param, L3_DYN_START, L3_DYN_SIZE);")
+        # copy the initial contents over
+        f.writeln("pi_ram_copy_self(ram_param, L3_BASE, L3_BASE_INIT, L3_SIZE);")
         f.writeln()
 
         # TODO re-enable once we can get this synchronized
@@ -432,8 +401,8 @@ def generate_func_init(f, state: State):
             core_l1_size = state.allocations.core_allocators[i].allocated_size_used
             f.writeln(f"if (cluster_id == {i}) {{")
             with f:
-                f.writeln(f"L1_START_C{i} = pi_l1_malloc(cluster_device, {core_l1_size});")
-                f.writeln(f"if (L1_START_C{i} == NULL) {{")
+                f.writeln(f"L1_BASE_C{i} = pi_l1_malloc(cluster_device, {core_l1_size});")
+                f.writeln(f"if (L1_BASE_C{i} == NULL) {{")
                 with f:
                     f.writeln("return -1;")
                 f.writeln("}")
@@ -443,25 +412,24 @@ def generate_func_init(f, state: State):
     f.writeln("}")
 
 
-def generate_func_final(f, state: State):
+def generate_func_final(f, state: State, outputs_to_check):
     f.writeln("void generated_final_cluster(int cluster_id, struct pi_device *cluster_device) {")
     with f:
         for i in range(state.core_count):
             core_l1_size = state.tmp_size_per_core[i]
             f.writeln(f"if (cluster_id == {i}) {{")
             with f:
-                f.writeln(f"pi_l1_free(cluster_device, L1_START_C{i}, {core_l1_size});")
+                f.writeln(f"pi_l1_free(cluster_device, L1_BASE_C{i}, {core_l1_size});")
             f.writeln("}")
     f.writeln("}")
     f.writeln()
 
     f.writeln("void generated_final_fabric() {")
     with f:
-        # verify outputs
-        for name, buffer in state.buffers.items():
-            if not buffer.const and buffer.pointer_l3_expected is not None:
-                f.writeln(
-                    f"verify_output(ram, {buffer.pointer_l3_expected}, {buffer.pointer_l3}, {buffer.padded_tensor.size_bytes}, \"{name}\");")
+        for (name, offset, size) in outputs_to_check:
+            print(f"Verifying {name}: offset {offset} size {size}")
+            f.writeln(
+                f"verify_output(ram, L3_BASE_FINAL + {offset}, L3_BASE + {offset}, {size}, \"{name}\");")
 
         f.writeln()
 
@@ -494,63 +462,91 @@ def generate_func_core(f, state: State, core):
     f.writeln("}")
 
 
+def simulate_write_value(target, placement: TensorPlacement, value) -> (int, int):
+    assert placement.tensor.rank == len(value.shape)
+    assert all(t >= v for t, v in zip(placement.tensor.shape, value.shape))
+    assert placement.tensor.has_simple_strides
+
+    padded_shape = placement.tensor.shape
+    padded_value = np.zeros(padded_shape, dtype=np.uint8)
+
+    slices = []
+    for t, v in zip(placement.tensor.shape, value.shape):
+        assert t >= v
+        delta = t - v
+        assert delta % 2 == 0
+        padding = delta // 2
+        slices.append(slice(padding, padding + v))
+
+    padded_value[*slices] = value
+
+    offset = placement.offset_core + placement.tensor.offset_bytes
+    size = placement.tensor.size_bytes
+    target[offset:offset + size] = list(array_to_bytes(padded_value.flatten(), placement.tensor.dtype))
+
+    return offset, size
+
+
+def determine_l3_data(state: State):
+    offchip_core = state.core_count
+    l3_allocator = state.allocations.core_allocators[offchip_core]
+    l3_size = l3_allocator.allocated_size_used
+
+    l3_groups = state.groups_per_core[offchip_core]
+
+    l3_init = np.zeros(l3_size, dtype=np.uint8)
+
+    for group in l3_groups.groups:
+        if group.value_name in state.simulated_constants:
+            value = state.simulated_constants[group.value_name]
+            placement = state.placement_for_group_range(offchip_core, -np.inf, group, group.loop_ranges)
+            print(f"Initially placing constant with shape {value.shape} in {placement}")
+
+            simulate_write_value(l3_init, placement, value)
+
+    l3_final = np.zeros(l3_size, dtype=np.uint8)
+
+    # TODO only write to groups that are still alive at the end?
+    # or at least only verify those
+    output_names = [n.name for n in state.onnx_model.graph.output]
+    outputs_to_check = []
+
+    for group in l3_groups.groups:
+        if group.value_name in output_names and group.value_name in state.simulated_values:
+            value = state.simulated_values[group.value_name]
+            placement = state.placement_for_group_range(offchip_core, np.inf, group, group.loop_ranges)
+            print(f"Finally placing value with shape {value.shape} in {placement}")
+
+            offset, size = simulate_write_value(l3_final, placement, value)
+            outputs_to_check.append((group.value_name, offset, size))
+
+    return l3_size, l3_init, l3_final, outputs_to_check
+
+
 def generate_data(f, state: State, d_bin):
-    alloc_l3_const = LinearAllocator()
-    alloc_l3_dyn = LinearAllocator()
-
-    for name, buffer in state.buffers.items():
-        upper = name_to_c_upper(name)
-
-        if buffer.inner_simulated is not None:
-            assert buffer.inner_simulated.shape == buffer.inner_tensor.shape
-
-            offset = alloc_l3_const.alloc(buffer.padded_tensor.size_bytes)
-            offset_name = f"L3_CONST_OFFSET_{upper}"
-            f.writeln(f"#define {offset_name} {offset}")
-
-            pointer = Pointer(f"(L3_CONST_START + {offset_name})", MemoryKind.L3)
-            if buffer.const:
-                assert buffer.pointer_l3 == pointer
-            else:
-                buffer.pointer_l3_expected = pointer
-
-            padded_value = np.zeros_like(buffer.inner_simulated, shape=buffer.padded_tensor.shape)
-            padded_value[*buffer.slices] = buffer.inner_simulated
-
-            value_bytes = array_to_bytes(padded_value.flatten(), buffer.dtype)
-            assert len(value_bytes) == buffer.padded_tensor.size_bytes
-            d_bin.write(value_bytes)
-
-        if not buffer.const:
-            offset = alloc_l3_dyn.alloc(buffer.padded_tensor.size_bytes)
-            offset_name = f"L3_DYN_OFFSET_{upper}"
-            # TODO split into offset and start again
-            f.writeln(f"#define {offset_name} {offset}")
-
-        print(f"Buffer {upper}")
-        print(f"  inner_shape: {buffer.inner_shape}")
-        print(f"  padding: {buffer.padding}")
-        # if buffer.inner_simulated is not None:
-        #     print(f"  values: {buffer.inner_simulated.tolist()}")
-        #     print(f"  bytes: [{', '.join(f'{x:#02x}' for x in value_bytes)}]")
-
-    f.writeln()
-
     # TODO is this correct? is it necessary to store L1 in L1 and L2 in L2?
     for i in range(state.core_count):
-        f.writeln(f"static PI_L1 u8 *L1_START_C{i} = NULL;")
+        f.writeln(f"static PI_L1 u8 *L1_BASE_C{i} = NULL;")
     f.writeln()
 
     for i in range(state.core_count):
         core_l2_size = state.allocations.core_allocators[i].allocated_size_used
-        f.writeln(f"static PI_L2 u8 L2_START_C{i}[{core_l2_size}];")
+        f.writeln(f"static PI_L2 u8 L2_BASE_C{i}[{core_l2_size}];")
     f.writeln()
 
-    # TODO rethink dyn and const, just put input and expected output in const and leave the rest for dyn
-    f.writeln("static u32 L3_CONST_START = 0;")
-    f.writeln("static u32 L3_DYN_START = 0;")
-    f.writeln(f"#define L3_CONST_SIZE {len(alloc_l3_const)}")
-    f.writeln(f"#define L3_DYN_SIZE {len(alloc_l3_dyn)}")
+    l3_size, data_init, data_final, outputs_to_check = determine_l3_data(state)
+    assert len(data_init) == l3_size
+    assert len(data_final) == l3_size
+
+    d_bin.write(data_init)
+    d_bin.write(data_final)
+
+    f.writeln("static u32 L3_BASE = 0;")
+    f.writeln("static u32 L3_BASE_INIT = 0;")
+    f.writeln("static u32 L3_BASE_FINAL = 0;")
+    f.writeln(f"#define L3_SIZE {l3_size}")
+
+    return outputs_to_check
 
 
 def generate_core_dispatch(f, cores: int):
@@ -575,12 +571,12 @@ def generate_code(state: State, project_path):
         f.writeln()
         generate_meta(f, state)
         f.writeln()
-        generate_data(f, state, file_data_bin)
+        outputs_to_check = generate_data(f, state, file_data_bin)
         f.writeln()
 
         generate_func_init(f, state)
         f.writeln()
-        generate_func_final(f, state)
+        generate_func_final(f, state, outputs_to_check)
         f.writeln()
 
         generate_func_fabric(f, state)

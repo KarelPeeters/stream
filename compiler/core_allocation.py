@@ -3,17 +3,21 @@ from dataclasses import dataclass
 from math import prod
 from typing import Set, Any, Tuple, Dict, List, Optional
 
+import numpy as np
 from matplotlib import pyplot as plt
 
 from compiler.allocator import Token, TimeAllocator
 from stream.classes.cost_model.record import Step, StepAddTensorToCore, StepRemoveTensorFromCore, StepRunNode, \
     StepTransferData
+from stream.classes.workload.computation_node import ComputationNode
 
 
 @dataclass
 class Group:
     index: int
     elem_size_bits: int
+    value_name: str
+
     tensor_keys: Set[Any]
     loop_ranges: Dict[str, Tuple[int, int]]
 
@@ -32,9 +36,11 @@ class TensorGroups:
 
 @dataclass
 class PartialGroup:
+    elem_size_bits: int
+    value_name: str
+
     tensor_keys: Set[Any]
     loop_ranges: Dict[str, Tuple[int, int]]
-    elem_size_bits: Optional[int]
 
     def merge_loop_ranges(self, loop_ranges: Dict[str, Tuple[int, int]], must_match: bool):
         if must_match:
@@ -46,6 +52,24 @@ class PartialGroup:
                     min(self.loop_ranges[d][0], loop_ranges[d][0]),
                     max(self.loop_ranges[d][1], loop_ranges[d][1])
                 )
+
+
+def tensor_value_name(tensor):
+    # TODO this is messy and brittle
+    origin: ComputationNode = tensor.origin
+    layer_operand = tensor.layer_operand
+    input_names = origin.input_names
+    output_names = origin.output_names
+
+    input_name, weight_name, bias_name = input_names
+    output_name, = output_names
+
+    if layer_operand == "W":
+        return weight_name
+    if layer_operand == "I":
+        return input_name
+    if layer_operand == "O":
+        return output_name
 
 
 class TensorGrouper:
@@ -72,6 +96,7 @@ class TensorGrouper:
             tensor_keys={key},
             loop_ranges={d: r for d, r in zip(tensor.loop_dimensions, tensor.loop_ranges)},
             elem_size_bits=elem_size_bits,
+            value_name=tensor_value_name(tensor),
         ))
         self.key_to_group[key] = group
         return group
@@ -82,6 +107,9 @@ class TensorGrouper:
 
         x_partial = self.groups[x_group]
         y_partial = self.groups[y_group]
+
+        assert x_partial.elem_size_bits == y_partial.elem_size_bits
+        assert x_partial.value_name == y_partial.value_name
 
         x_partial.tensor_keys |= y_partial.tensor_keys
         x_partial.merge_loop_ranges(y_partial.loop_ranges, must_match=True)
@@ -118,7 +146,8 @@ class TensorGrouper:
                 index=index,
                 elem_size_bits=partial.elem_size_bits,
                 tensor_keys=partial.tensor_keys,
-                loop_ranges=partial.loop_ranges
+                loop_ranges=partial.loop_ranges,
+                value_name=partial.value_name,
             ))
 
         # map group indices
@@ -185,7 +214,7 @@ def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
                 ("IX", "IX"),
                 ("IY", "OY"),
                 ("IX", "OX"),
-             ]
+            ]
             merged_ranges = {k1: step.node.loop_ranges[k0] for (k0, k1) in merged_keys if k0 in step.node.loop_ranges}
 
             print(f"Merging in loop ranges: {merged_ranges}")
@@ -279,12 +308,16 @@ class CoreAllocations:
     core_allocators: List[TimeAllocator]
     core_group_step_to_token: Dict[Tuple[int, int], List[Tuple[int, Token]]]
 
+    # step=-inf means first occurrence, step=inf means last
     def get_token_for_group(self, core: int, group: int, step: int) -> Token:
         step_list = self.core_group_step_to_token[(core, group)]
 
         prev_token = None
 
         for curr_step, token in step_list:
+            if step == -np.inf:
+                return token
+
             # find the last token with curr_step <= step
             if curr_step > step:
                 assert prev_token is not None
@@ -355,4 +388,7 @@ def allocate_per_core(groups_per_core: List[TensorGroups], steps: List[Step]) ->
         else:
             assert False, f"Unknown step type {step}"
 
-    return CoreAllocations(core_allocators=allocators, core_group_step_to_token=core_group_step_to_token)
+    return CoreAllocations(
+        core_allocators=allocators,
+        core_group_step_to_token=core_group_step_to_token,
+    )

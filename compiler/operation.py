@@ -4,8 +4,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-import numpy as np
-
 from compiler.data_type import DataType
 
 
@@ -383,43 +381,6 @@ class Tensor:
 def map_int(f: float) -> int:
     assert float(int(f)) == f, f"Cannot map {f} to int"
     return int(f)
-
-
-# TODO rename to L3Buffer?
-@dataclass
-class Buffer:
-    dtype: DataType
-
-    inner_shape: Tuple[int]
-    padding: Tuple[Tuple[int, int]]
-
-    pointer_l3: Pointer
-    pointer_l3_expected: Optional[Pointer] = None
-
-    const: bool = False
-    input: bool = False
-
-    inner_simulated: Optional[np.array] = None
-
-    def __post_init__(self):
-        assert len(self.inner_shape) == len(self.padding)
-
-    @property
-    def has_padding(self):
-        return any(start != 0 or end != 0 for (start, end) in self.padding)
-
-    @property
-    def padded_tensor(self):
-        padded_shape = tuple([start + size + end for size, (start, end) in zip(self.inner_shape, self.padding)])
-        return Tensor.simple(self.dtype, padded_shape)
-
-    @property
-    def slices(self):
-        return [slice(start, start + size) for size, (start, _) in zip(self.inner_shape, self.padding)]
-
-    @property
-    def inner_tensor(self):
-        return self.padded_tensor[*self.slices]
 
 
 def simple_strides(shape):
