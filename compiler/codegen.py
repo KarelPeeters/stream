@@ -506,8 +506,6 @@ def determine_l3_data(state: State):
 
     l3_final = np.zeros(l3_size, dtype=np.uint8)
 
-    # TODO only write to groups that are still alive at the end?
-    # or at least only verify those
     output_names = [n.name for n in state.onnx_model.graph.output]
     outputs_to_check = []
 

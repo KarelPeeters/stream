@@ -291,10 +291,18 @@ def visit_step_transfer(state: State, step_index: int, step: StepTransferData):
 
     # core operations
     state.push_cycles(core, "start", dir_str)
-    state.push_operation(core, OperationLockIncrement(fabric_start))
-    state.push_operation(core, OperationLockWait(fabric_done, 1))
-    state.push_copy(core, pointer_l1, pointer_l2, tensor_core.size_bytes)
+
+    if down:
+        state.push_operation(core, OperationLockIncrement(fabric_start))
+        state.push_operation(core, OperationLockWait(fabric_done, 1))
+        state.push_copy(core, pointer_l1, pointer_l2, tensor_core.size_bytes)
+    else:
+        state.push_copy(core, pointer_l2, pointer_l1, tensor_core.size_bytes)
+        state.push_operation(core, OperationLockIncrement(fabric_start))
+        state.push_operation(core, OperationLockWait(fabric_done, 1))
+
     state.push_cycles(core, "end", dir_str)
+    state.push_operation(core, OperationPad())
 
 
 def visit_step_run_node(state: State, step_index: int, step: StepRunNode):
