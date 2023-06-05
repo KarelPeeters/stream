@@ -214,11 +214,26 @@ class OperationConvPadded(Operation):
 
 @dataclass
 class OperationMemClear(Operation):
-    base: Pointer
-    size_bytes: int
+    ptr: Pointer
+    tensor: 'Tensor'
 
     def generate_code(self, core: Optional[int], f):
-        f.writeln(f"memset({self.base}, 0, {self.size_bytes});")
+        assert core is not None
+        assert self.ptr.kind in [MemoryKind.L1, MemoryKind.L2]
+
+        tensor = self.tensor.simplify_for_copy()
+
+        if tensor.rank == 1 and tensor.stride_bytes(0) == 1:
+            f.writeln(f"memset({self.ptr.offset(tensor.offset_bytes)}, 0, {self.tensor.size_bytes});")
+        else:
+            sizes = [1] * (4-tensor.rank) + [tensor.shape_bytes(d) for d in range(tensor.rank)]
+            strides = [0] * (4-tensor.rank) + [tensor.stride_bytes(d) for d in range(tensor.rank)]
+
+            sizes_str = ", ".join([str(s) for s in sizes])
+            strides_str = ", ".join([str(s) for s in strides])
+
+            f.writelnf(f"mem_clear_4d({self.ptr.offset(tensor.offset_bytes)}, {sizes_str}, {strides_str});")
+
 
 
 # TODO just replace with set/wait

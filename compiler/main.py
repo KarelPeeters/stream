@@ -211,8 +211,8 @@ def visit_conv(state: State, core: int, step_index: int, step: StepRunNode, orig
     print(f"  weight: {weight_place}")
     print(f"  output: {output_place}")
 
-    assert input_place.tensor.has_simple_strides
-    assert weight_place.tensor.has_simple_strides
+    assert input_place.tensor.simplify_for_copy().has_simple_strides
+    assert weight_place.tensor.simplify_for_copy().has_simple_strides
 
     out_stride_b, _, out_stride_h, out_stride_w, out_stride_k = output_place.tensor.strides_elem
     assert out_stride_k == 1
@@ -223,7 +223,7 @@ def visit_conv(state: State, core: int, step_index: int, step: StepRunNode, orig
         state.push_cycles(core, "start", "clear")
         state.push_operation(core, OperationMemClear(
             l1_base.offset(output_place.offset_core),
-            output_place.padded_tensor.size_bytes
+            output_place.padded_tensor,
         ))
         state.push_cycles(core, "end", "clear")
 
