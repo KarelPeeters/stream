@@ -76,6 +76,7 @@ def schedule_graph(
             if (n.id[0] in sink_layers) and (n.produces_final_output is True)
         )
     )
+    output_nodes = {n for n in G.nodes() if n.produces_final_output is True}
 
     # Get the offchip core id
     offchip_core_id = accelerator.offchip_core_id
@@ -331,6 +332,29 @@ def schedule_graph(
                 ) = accelerator.memory_manager.remove_tensor_from_core(
                     core, top_level_idx, output_tensor, end, write_back_to_offchip=True
                 )
+                total_sink_layer_output_offchip_link_energy += link_energy_cost
+                total_sink_layer_output_offchip_memory_energy += memory_energy_cost
+        # If this node is not a sink not but still an output node, write the tensor to offchip
+        elif best_candidate in output_nodes:
+            top_level_idx = accelerator.memory_manager.get_top_level_idx(
+                core, output_tensor.memory_operand
+            )
+            # Only push back sink node outputs if they're generated and stored on the core
+            if not best_candidate.output_operand in best_candidate.too_large_operands:
+                (
+                    _,
+                    current_timestep,
+                    link_energy_cost,
+                    memory_energy_cost,
+                ) = accelerator.transfer_data(
+                    output_tensor,
+                    core,
+                    accelerator.offchip_core_id,
+                    output_tensor.memory_operand,
+                    end,
+                )
+                accelerator.memory_manager.add_tensor_to_core(output_tensor, accelerator.offchip_core_id, end, current_timestep, [], )
+
                 total_sink_layer_output_offchip_link_energy += link_energy_cost
                 total_sink_layer_output_offchip_memory_energy += memory_energy_cost
 
