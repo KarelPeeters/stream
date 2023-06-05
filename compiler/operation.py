@@ -223,7 +223,7 @@ class OperationMemClear(Operation):
 
         tensor = self.tensor.simplify_for_copy()
 
-        if tensor.rank == 1 and tensor.stride_bytes(0) == 1:
+        if tensor.rank == 1 and tensor.strides_elem[0] == 1:
             f.writeln(f"memset({self.ptr.offset(tensor.offset_bytes)}, 0, {self.tensor.size_bytes});")
         else:
             sizes = [1] * (4-tensor.rank) + [tensor.shape_bytes(d) for d in range(tensor.rank)]
