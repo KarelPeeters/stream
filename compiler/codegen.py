@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass
-from typing import Optional, Dict, List, Tuple, Any
+from typing import Optional, Dict, List, Tuple, Any, Set
 
 import numpy as np
 from networkx import DiGraph
@@ -70,6 +70,8 @@ AXES_CANDIDATES_ORDERED = [
 
 @dataclass
 class TensorPlacement:
+    group: Group
+
     offset_core: int
     tensor: Tensor
 
@@ -170,6 +172,8 @@ class State:
         self.operations_per_core: List[List[Operation]] = [[] for _ in range(core_count)]
         self.operations_fabric: List[Operation] = []
 
+        self.groups_cleared_per_core: List[Set[int]] = [set() for _ in range(core_count)]
+
         self.tmp_size_per_core: List[int] = [0 for _ in range(core_count)]
         self.cn_locks = dict()
 
@@ -258,6 +262,7 @@ class State:
         padded_tensor = group_tensor[*padded_slices]
 
         return TensorPlacement(
+            group=group,
             offset_core=token.offset,
             tensor=piece_tensor,
             padded_tensor=padded_tensor,

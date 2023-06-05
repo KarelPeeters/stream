@@ -219,11 +219,20 @@ def visit_conv(state: State, core: int, step_index: int, step: StepRunNode, orig
 
     l1_base = state.l1_base_core[core]
 
-    if output_place.tensor != output_place.padded_tensor:
+    fills_output = output_place.tensor == output_place.padded_tensor
+    group_cleared = output_place.group.index in state.groups_cleared_per_core[core]
+
+    # clear the entire group at once if necessary
+    # TODO there even more cases where we can skip this, eg. if all convs together cover the entire output
+    if not fills_output and not group_cleared:
+        state.groups_cleared_per_core[core].add(output_place.group.index)
+
+        group_place = state.placement_for_group_range(core, step_index, output_place.group, output_place.group.loop_ranges)
+
         state.push_cycles(core, "start", "clear")
         state.push_operation(core, OperationMemClear(
             l1_base.offset(output_place.offset_core),
-            output_place.padded_tensor,
+            group_place.tensor,
         ))
         state.push_cycles(core, "end", "clear")
 
