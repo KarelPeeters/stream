@@ -219,12 +219,13 @@ def visit_conv(state: State, core: int, step_index: int, step: StepRunNode, orig
 
     l1_base = state.l1_base_core[core]
 
-    state.push_cycles(core, "start", "clear")
-    state.push_operation(core, OperationMemClear(
-        l1_base.offset(output_place.offset_core),
-        output_place.padded_tensor.size_bytes
-    ))
-    state.push_cycles(core, "end", "clear")
+    if output_place.tensor != output_place.padded_tensor:
+        state.push_cycles(core, "start", "clear")
+        state.push_operation(core, OperationMemClear(
+            l1_base.offset(output_place.offset_core),
+            output_place.padded_tensor.size_bytes
+        ))
+        state.push_cycles(core, "end", "clear")
 
     state.push_cycles(core, "start", "calc")
     state.push_operation(core, OperationConvPadded(
