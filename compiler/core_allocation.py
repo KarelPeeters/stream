@@ -235,7 +235,16 @@ def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
         print()
 
     # merge all tensors that are conceptually the same on the offchip core
-    merger_per_core[-1].merge_matching_tensors(list(merger_per_core[-1].key_to_tensor.values()))
+    offchip_merger = merger_per_core[-1]
+    offchip_merger.merge_matching_tensors(list(offchip_merger.key_to_tensor.values()))
+
+    # merge groups on inner cores onto groups on the offchip core
+    for merger in merger_per_core[:-1]:
+        for group in merger.groups:
+            for key in group.tensor_keys:
+                if key in offchip_merger.key_to_tensor:
+                    offchip_merger.groups[offchip_merger.get_group(merger.key_to_tensor[key], allow_new=True)]\
+                        .merge_loop_ranges(group.loop_ranges, must_match=True)
 
     merged_groups_per_core = [m.finish() for m in merger_per_core]
 
@@ -270,25 +279,25 @@ def collect_tensor_groups(cores: int, steps: List[Step]) -> List[TensorGroups]:
 
         fig, axes = plt.subplots(
             nrows=len(core_tensors),
-            sharex="all", squeeze=False, figsize=(32, 32)
+            sharex="all", squeeze=False#, figsize=(32, 32)
         )
         axes = axes.squeeze(1)
 
         for i, (tensor_key, (start, last_used, end)) in enumerate(core_tensors):
-            tensor = core_groups.key_to_tensor[tensor_key]
-            print(f"Slice {core_id} {tensor} {start}..{end} last={last_used}")
+            key = core_groups.key_to_tensor[tensor_key]
+            print(f"Slice {core_id} {key} {start}..{end} last={last_used}")
 
             ax = axes[i]
-            ax.set_ylabel(f"{core_id}, {tensor}", rotation='horizontal', ha='right')
+            ax.set_ylabel(f"{core_id}, {key}", rotation='horizontal', ha='right')
 
             if end is None:
                 end = max_lifetime
 
             if start is not None and end is not None:
-                color = group_color[core_groups.get_group(tensor).index]
+                color = group_color[core_groups.get_group(key).index]
                 ax.axvspan(start, end, facecolor=color, alpha=1.0)
             else:
-                print(f"Warning: {core_id} {tensor} has invalid lifetime {start}..{end}")
+                print(f"Warning: {core_id} {key} has invalid lifetime {start}..{end}")
 
         # fig.tight_layout()
         plt.savefig(plot_path)

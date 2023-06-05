@@ -190,6 +190,10 @@ class OperationConvPadded(Operation):
     fh: int
     fw: int
 
+    out_stride_b: int
+    out_stride_h: int
+    out_stride_w: int
+
     input: Pointer
     weight: Pointer
     output: Pointer
@@ -201,10 +205,20 @@ class OperationConvPadded(Operation):
         f.writeln(
             f"run_conv("
             f"{self.b}, {self.k}, {self.c}, {self.oh}, {self.ow}, {self.fh}, {self.fw}, "
+            f"{self.out_stride_b}, {self.out_stride_h}, {self.out_stride_w}, "
             f"{self.weight}, {self.input}, {self.output}, "
             f"&{self.profile}"
             f");"
         )
+
+
+@dataclass
+class OperationMemClear(Operation):
+    base: Pointer
+    size_bytes: int
+
+    def generate_code(self, core: Optional[int], f):
+        f.writeln(f"memset({self.base}, 0, {self.size_bytes});")
 
 
 # TODO just replace with set/wait

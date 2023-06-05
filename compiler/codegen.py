@@ -73,7 +73,10 @@ class TensorPlacement:
     offset_core: int
     tensor: Tensor
 
-    # get a pointer that contains both offsets
+    # version of tensor that may contain zero padding and is hopefully simpler to copy
+    padded_tensor: Tensor
+    padded_loop_ranges: Dict[str, Tuple[int, int]]
+
     def offset(self, pointer: Pointer) -> Pointer:
         return pointer.offset(self.offset_core).offset(self.tensor.offset_bytes)
 
@@ -215,6 +218,27 @@ class State:
         group_ranges = loop_ranges_for_axes(axes, group.loop_ranges)
         piece_ranges = loop_ranges_for_axes(axes, loop_ranges)
 
+        padded_ranges = piece_ranges
+
+        if len(axes) == 5:
+            range_b, range_g, range_iy, range_ix, range_c = piece_ranges
+
+            padded_ranges = (
+                range_b,
+                range_g,
+                (range_iy[0] - 1, range_iy[1] + 1),
+                (range_ix[0] - 1, range_ix[1] + 1),
+                range_c
+            )
+
+            for (pad_start, pad_end), (group_start, group_end) in zip(padded_ranges, group_ranges):
+                if pad_start < group_start or pad_end > group_end:
+                    # fail
+                    padded_ranges = piece_ranges
+                    break
+
+        padded_loop_ranges = dict(zip(axes, padded_ranges))
+
         group_shape = [
             group_end - group_start
             for group_start, group_end in group_ranges
@@ -227,9 +251,17 @@ class State:
         ]
         piece_tensor = group_tensor[*piece_slices]
 
+        padded_slices = [
+            slice(piece_start - group_start, piece_end - group_start)
+            for (group_start, _), (piece_start, piece_end) in zip(group_ranges, padded_ranges)
+        ]
+        padded_tensor = group_tensor[*padded_slices]
+
         return TensorPlacement(
             offset_core=token.offset,
             tensor=piece_tensor,
+            padded_tensor=padded_tensor,
+            padded_loop_ranges=padded_loop_ranges,
         )
 
     def push_operation(self, core: Optional[int], operation: Operation):
@@ -484,8 +516,6 @@ def simulate_write_value(target, placement: TensorPlacement, value) -> (int, int
     size = placement.tensor.size_bytes
     target[offset:offset + size] = list(array_to_bytes(padded_value.flatten(), placement.tensor.dtype))
 
-    return offset, size
-
 
 def determine_l3_data(state: State):
     offchip_core = state.core_count
@@ -513,10 +543,11 @@ def determine_l3_data(state: State):
         if group.value_name in output_names and group.value_name in state.simulated_values:
             value = state.simulated_values[group.value_name]
             placement = state.placement_for_group_range(offchip_core, np.inf, group, group.loop_ranges)
+
             print(f"Finally placing value with shape {value.shape} in {placement}")
 
-            offset, size = simulate_write_value(l3_final, placement, value)
-            outputs_to_check.append((group.value_name, offset, size))
+            simulate_write_value(l3_final, placement, value)
+            outputs_to_check.append((group.value_name, placement.offset_core, placement.tensor.size_bytes))
 
     return l3_size, l3_init, l3_final, outputs_to_check
 

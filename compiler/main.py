@@ -7,12 +7,12 @@ from networkx import DiGraph
 
 from compiler.allocator import LinearAllocator
 from compiler.codegen import generate_code, State, EQUATION_MATMUL, EQUATION_CONV
-from compiler.core_allocation import collect_tensor_groups, allocate_per_core, tensor_value_name
+from compiler.core_allocation import collect_tensor_groups, allocate_per_core
 from compiler.data_type import DataType
 from compiler.ima_simulate import ima_matmul, ima_conv
 from compiler.operation import MemoryKind, Pointer, OperationMatmul, \
     OperationPad, ProfileInfo, OperationLockIncrement, OperationLockWait, \
-    OperationComment, OperationConvPadded
+    OperationComment, OperationConvPadded, OperationMemClear
 from compiler.plot_profile import plot_profile
 from stream.classes.cost_model.cost_model import StreamCostModelEvaluation
 from stream.classes.cost_model.record import Step, StepRemoveTensorFromCore, StepRunNode, StepAddTensorToCore, \
@@ -206,17 +206,39 @@ def visit_conv(state: State, core: int, step_index: int, step: StepRunNode, orig
 
     output_place = state.placement_for_tensor(core, step_index, step.output)
 
+    print(f"Running conv")
+    print(f"   input: {input_place}")
+    print(f"  weight: {weight_place}")
+    print(f"  output: {output_place}")
+
+    assert input_place.tensor.has_simple_strides
+    assert weight_place.tensor.has_simple_strides
+
+    out_stride_b, _, out_stride_h, out_stride_w, out_stride_k = output_place.tensor.strides_elem
+    assert out_stride_k == 1
+
+    l1_base = state.l1_base_core[core]
+
+    state.push_cycles(core, "start", "clear")
+    state.push_operation(core, OperationMemClear(
+        l1_base.offset(output_place.offset_core),
+        output_place.padded_tensor.size_bytes
+    ))
+    state.push_cycles(core, "end", "clear")
+
     state.push_cycles(core, "start", "calc")
     state.push_operation(core, OperationConvPadded(
         b=(b_end - b_start), k=(k_end - k_start), c=(c_end - c_start),
         oh=(oy_end - oy_start), ow=(ox_end - ox_start),
         fh=3, fw=3,
-        input=input_place.offset(state.l1_base_core[core]),
-        weight=weight_place.offset(state.l1_base_core[core]),
-        output=output_place.offset(state.l1_base_core[core]),
+        out_stride_b=out_stride_b, out_stride_h=out_stride_h, out_stride_w=out_stride_w,
+        input=input_place.offset(l1_base),
+        weight=weight_place.offset(l1_base),
+        output=output_place.offset(l1_base),
         profile=state.new_profile(ProfileInfo(core=f"ima_core_{core}", name="conv")),
     ))
     state.push_cycles(core, "end", "calc")
+    state.push_operation(core, OperationPad())
 
     # simulate
     if state.should_simulate(node.output_names[0]):
@@ -270,12 +292,26 @@ def visit_step_transfer(state: State, step_index: int, step: StepTransferData):
 
     # TODO support real tensors on the core too
     tensor_core = placement_core.tensor.simplify_for_copy()
-    assert tensor_core.rank == 1
+    if tensor_core.rank != 1:
+        # try copying the padded tensor, and hope that one has simpler strides
+        tensor_core = placement_core.padded_tensor.simplify_for_copy()
+
+        # also use the padded version of the offchip tensor
+        group_offchip = state.groups_per_core[offchip_core].get_group(step.tensor)
+        placement_offchip = state.placement_for_group_range(
+            offchip_core,
+            step_index,
+            group_offchip,
+            placement_core.padded_loop_ranges
+        )
+
+    assert tensor_core.rank == 1, \
+        f"Only simple core tensors supported for now, got {placement_core.tensor} or {placement_core.padded_tensor}"
 
     # L3 tensor offset happens in copy_to_tensor
     pointer_l3 = state.l3_base.offset(placement_offchip.offset_core)
-    pointer_l2 = placement_core.offset(state.l2_base_core[core])
-    pointer_l1 = placement_core.offset(state.l1_base_core[core])
+    pointer_l2 = state.l2_base_core[core].offset(placement_core.offset_core).offset(tensor_core.offset_bytes)
+    pointer_l1 = state.l1_base_core[core].offset(placement_core.offset_core).offset(tensor_core.offset_bytes)
 
     # locks
     fabric_start = state.new_lock()
