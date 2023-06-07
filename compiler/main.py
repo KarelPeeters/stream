@@ -281,11 +281,20 @@ def visit_step_transfer(state: State, step_index: int, step: StepTransferData):
     up = receiver == offchip_core
 
     if not (down ^ up):
+        lock = state.new_lock()
+
         print(f"Warning: skipped transfer {step}")
         comment = OperationComment(f"Warning: skipped transfer {step.tensor} {sender}->{receiver}")
         state.push_operation(None, comment)
+        state.push_operation(None, OperationPad())
+
         state.push_operation(sender, comment)
+        state.push_operation(sender, OperationLockIncrement(lock))
+        state.push_operation(sender, OperationPad())
+
         state.push_operation(receiver, comment)
+        state.push_operation(receiver, OperationLockWait(lock, 1))
+        state.push_operation(receiver, OperationPad())
         return
 
     assert up ^ down
