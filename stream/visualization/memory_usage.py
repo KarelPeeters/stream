@@ -166,7 +166,7 @@ def plot_memory_usage(
             va="center",
         )
 
-    # ax.set_xlabel("Cycles")  # Set xlabel of last axis (bottom one)
+    ax.set_xlabel("Cycles")  # Set xlabel of last axis (bottom one)
     # plt.show(block=True)
     fig.savefig(fig_path)
     print(f"Saved memory usage fig to {fig_path}")

@@ -4,6 +4,8 @@ from typing import Optional, List, Tuple
 
 import matplotlib.pyplot as plt
 
+from stream.visualization.memory_usage import humanbytes, BIGGER_SIZE
+
 
 class LinearAllocator:
     def __init__(self):
@@ -34,6 +36,31 @@ class Token:
     offset: Optional[int] = None
 
 
+def plot_mem_line(ax, timestamps, y, y_size, style: str, va: str):
+    ax.axhline(
+        y=y,
+        xmin=min(timestamps),
+        xmax=max(timestamps),
+        color="r",
+        linestyle=style,
+    )
+
+    if y_size is None:
+        mem_text = humanbytes(y)
+    else:
+        mem_text = f"{humanbytes(y)} / {humanbytes(y_size)}"
+
+    ax.text(
+        max(timestamps) - 1,
+        y,
+        mem_text,
+        color="r",
+        va=va,
+        ha="right",
+        fontsize=BIGGER_SIZE,
+    )
+
+
 @dataclass
 class AllocationHistory:
     size: Optional[int]
@@ -46,10 +73,10 @@ class AllocationHistory:
         # plot patch
         ax = plt.figure(figsize=(16, 16)).gca()
         ax.set_xlim(0, self.history[-1][0])
-        ax.set_ylim(0, plot_size)
+        ax.set_ylim(0, plot_size * 1.2)
 
         timestamps = []
-        memory_used_sum = []
+        mem_used_dense = []
 
         for i, (time_start, free_segments) in enumerate(self.history):
             if i < len(self.history) - 1:
@@ -76,9 +103,9 @@ class AllocationHistory:
 
             timestamps.append(time_start)
             mem_free = sum((end if end is not None else plot_size) - start for start, end in free_segments)
-            memory_used_sum.append(plot_size - mem_free)
+            mem_used_dense.append(plot_size - mem_free)
 
-        if not(any(x > 0 for x in memory_used_sum)):
+        if not (any(x > 0 for x in mem_used_dense)):
             plt.close()
             return
 
@@ -88,8 +115,11 @@ class AllocationHistory:
             plt.savefig(block_path)
         plt.close()
 
-        plt.figure()
-        plt.plot(timestamps, memory_used_sum, drawstyle="steps-post")
+        ax = plt.figure().gca()
+        plt.plot(timestamps, mem_used_dense, drawstyle="steps-post")
+        plot_mem_line(ax, timestamps, max(mem_used_dense), self.size, "dotted", "top")
+        plot_mem_line(ax, timestamps, self.size_used, self.size, "dashed", "bottom")
+
         if line_path is None:
             plt.show()
         else:
@@ -205,7 +235,7 @@ def main():
     # alloc.free(c)
     d = alloc.alloc(512, 20)
 
-    alloc.run_allocation(None, 30).plot_history(None)
+    alloc.run_allocation(None, 30).plot_history(None, None)
 
     for token in alloc.tokens:
         print(token)
