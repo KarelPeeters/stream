@@ -40,13 +40,16 @@ class AllocationHistory:
     size_used: int
     history: List[Tuple[float, List[Tuple[int, int]]]]
 
-    def plot_history(self, path: Optional[str]):
+    def plot_history(self, block_path: Optional[str], line_path: Optional[str]):
         plot_size = self.size if self.size is not None else self.size_used
 
         # plot patch
         ax = plt.figure(figsize=(16, 16)).gca()
         ax.set_xlim(0, self.history[-1][0])
         ax.set_ylim(0, plot_size)
+
+        timestamps = []
+        memory_used_sum = []
 
         for i, (time_start, free_segments) in enumerate(self.history):
             if i < len(self.history) - 1:
@@ -71,10 +74,26 @@ class AllocationHistory:
                 ax.add_patch(
                     plt.Rectangle((time_start, prev_end), time_delta, self.size - prev_end, color='r'))
 
-        if path is None:
+            timestamps.append(time_start)
+            mem_free = sum((end if end is not None else plot_size) - start for start, end in free_segments)
+            memory_used_sum.append(plot_size - mem_free)
+
+        if not(any(x > 0 for x in memory_used_sum)):
+            plt.close()
+            return
+
+        if block_path is None:
             plt.show()
         else:
-            plt.savefig(path)
+            plt.savefig(block_path)
+        plt.close()
+
+        plt.figure()
+        plt.plot(timestamps, memory_used_sum, drawstyle="steps-post")
+        if line_path is None:
+            plt.show()
+        else:
+            plt.savefig(line_path)
         plt.close()
 
 

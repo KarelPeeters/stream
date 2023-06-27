@@ -1,3 +1,4 @@
+import os
 import random
 import subprocess
 from typing import Optional
@@ -443,7 +444,8 @@ def compile_and_run(
         size = None if core == cluster_cores else l1_size
         print(f"Allocating for core {core} with size {size}")
         history = allocator.run_allocation(size, final_time)
-        history.plot_history(f"outputs/alloc_core_{core}.png")
+        os.makedirs("outputs/alloc", exist_ok=True)
+        history.plot_history(f"outputs/alloc/alloc_core_{core}_block.png", f"outputs/alloc/alloc_core_{core}_line.png")
 
     # TODO onnx is probably not necessary any more
     state = State(

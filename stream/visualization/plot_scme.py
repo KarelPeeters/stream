@@ -5,7 +5,7 @@ from stream.classes.cost_model.cost_model import StreamCostModelEvaluation
 
 
 def bar_plot_stream_cost_model_evaluations_breakdown(
-        scmes: List[StreamCostModelEvaluation], fig_path: str, show: bool = False
+        scmes: List[Tuple[StreamCostModelEvaluation]], fig_path: str, show: bool = False
 ):
     barWidth = 0.1
 
