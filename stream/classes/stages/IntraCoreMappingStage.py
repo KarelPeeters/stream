@@ -159,6 +159,8 @@ class IntraCoreMappingStage(Stage):
         kwargs["workload"] = self.workload
         kwargs["accelerator"] = self.accelerator
         kwargs["node_hw_performances"] = self.node_hw_performances
+        # TODO what to pass here?
+        kwargs["operands_to_prefetch"] = []
 
         logger.info(f"Finished IntraCoreMappingStage.")
         sub_stage = self.list_of_callables[0](self.list_of_callables[1:], **kwargs)
