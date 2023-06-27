@@ -1,12 +1,23 @@
 import re
+from dataclasses import dataclass
 
 import matplotlib
 import matplotlib.pyplot as plt
 
 pattern_profile = re.compile(r"^== profile == (\d+) == ([^=]+) == ([^=]+) == ([^=]+)$")
+pattern_core = re.compile(r"^.*core_(\d+)$")
 
 
-def plot_profile(stdout: str, output_path: str, block: bool = True):
+@dataclass
+class CollectedProfile:
+    core_slices: dict
+    core_last_time: dict
+    names: dict
+
+    latency: int
+
+
+def parse_profile_info(stdout: str) -> CollectedProfile:
     core_slices = {}
     key_last_time = {}
     names = dict()  # deterministic set
@@ -36,20 +47,34 @@ def plot_profile(stdout: str, output_path: str, block: bool = True):
     # sort cores
     core_slices = dict(sorted(core_slices.items()))
 
+    core_last_time = dict()
+    for core, slices in core_slices.items():
+        if m := pattern_core.match(core):
+            core_index = int(m.group(1))
+            last_time = max(end for (name, start, end) in slices)
+            core_last_time[core_index] = last_time
+    latency = max(core_last_time.values())
+
+    # print for debugging
     for core, slices in core_slices.items():
         print(f"{core}: {slices}")
 
-    if len(core_slices) == 0:
+    info = CollectedProfile(core_slices, core_last_time, names, latency)
+    return info
+
+
+def plot_profile(info: CollectedProfile, output_path: str, block: bool = True):
+    if len(info.core_slices) == 0:
         return
 
     # plot slices
-    fig, axes = plt.subplots(nrows=len(core_slices), sharex="all", squeeze=False)
+    fig, axes = plt.subplots(nrows=len(info.core_slices), sharex="all", squeeze=False)
     axes = axes.squeeze(1)
 
     cmap = matplotlib.colormaps["tab10"]
-    name_colors = {name: cmap(i) for i, name in enumerate(names)}
+    name_colors = {name: cmap(i) for i, name in enumerate(info.names)}
 
-    for i, (core, slices) in enumerate(core_slices.items()):
+    for i, (core, slices) in enumerate(info.core_slices.items()):
         used_names = {}
 
         ax = axes[i]
@@ -78,7 +103,8 @@ def main():
 
     with open(path, "r") as f:
         data = f.read()
-    plot_profile(data, output_path)
+    profile = parse_profile_info(data)
+    plot_profile(profile, output_path)
 
 
 if __name__ == '__main__':

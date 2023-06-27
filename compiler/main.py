@@ -1,5 +1,6 @@
 import random
 import subprocess
+from typing import Optional
 
 import numpy as np
 import onnx
@@ -11,9 +12,9 @@ from compiler.core_allocation import collect_tensor_groups, allocate_per_core
 from compiler.data_type import DataType
 from compiler.ima_simulate import ima_matmul, ima_conv
 from compiler.operation import MemoryKind, Pointer, OperationMatmul, \
-    OperationPad, ProfileInfo, OperationLockIncrement, OperationLockWait, \
-    OperationComment, OperationConvPadded, OperationMemClear
-from compiler.plot_profile import plot_profile
+    OperationPad, OperationLockIncrement, OperationLockWait, \
+    OperationComment, OperationConvPadded, OperationMemClear, ProfileInfo
+from compiler.plot_profile import parse_profile_info, plot_profile, CollectedProfile
 from stream.classes.cost_model.cost_model import StreamCostModelEvaluation
 from stream.classes.cost_model.record import Step, StepRemoveTensorFromCore, StepRunNode, StepAddTensorToCore, \
     StepTransferData
@@ -227,7 +228,8 @@ def visit_conv(state: State, core: int, step_index: int, step: StepRunNode, orig
     if not fills_output and not group_cleared:
         state.groups_cleared_per_core[core].add(output_place.group.index)
 
-        group_place = state.placement_for_group_range(core, step_index, output_place.group, output_place.group.loop_ranges)
+        group_place = state.placement_for_group_range(core, step_index, output_place.group,
+                                                      output_place.group.loop_ranges)
 
         state.push_cycles(core, "start", "clear")
         state.push_operation(core, OperationMemClear(
@@ -415,7 +417,7 @@ def compile_and_run(
         pulp_sdk_path, project_path,
         l1_size: int, l2_size: int,
         simulate: bool, run: bool, plot: bool
-):
+) -> Optional[CollectedProfile]:
     random.seed(0xdeadbeef)
     np.random.seed(0xdeadbeef)
 
@@ -486,6 +488,11 @@ def compile_and_run(
             f.write(stdout)
 
         result.check_returncode()
+        profile = parse_profile_info(stdout)
 
         if plot:
-            plot_profile(stdout, "outputs/profile.png", block=False)
+            plot_profile(profile, "outputs/profile.png", block=False)
+
+        return profile
+
+    return None
