@@ -41,8 +41,9 @@ class ONNXModelParser:
         onnx_model = parse_onnx_model_from_path(self.onnx_model_path)
         self.onnx_model = onnx_model
 
-        mapping = parse_mapping_from_path(self.mapping_path)
-        self.mapping = mapping
+        if self.mapping is None:
+            mapping = parse_mapping_from_path(self.mapping_path)
+            self.mapping = mapping
 
         workload = self.parse_workload_from_onnx_model_and_mapping()
         self.workload = workload

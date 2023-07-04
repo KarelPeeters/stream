@@ -417,7 +417,8 @@ def compile_and_run(
         onnx_path, scme: StreamCostModelEvaluation, node_hw_performances,
         pulp_sdk_path, project_path,
         l1_size: int, l2_size: int,
-        simulate: bool, run: bool, plot: bool
+        simulate: bool, run: bool, plot: bool,
+        output_path: str,
 ) -> Optional[CollectedProfile]:
     random.seed(0xdeadbeef)
     np.random.seed(0xdeadbeef)
@@ -435,7 +436,7 @@ def compile_and_run(
     steps = scme.recording.steps
 
     print("Collecting tensor groups")
-    groups_per_core = collect_tensor_groups(cluster_cores, steps)
+    groups_per_core = collect_tensor_groups(cluster_cores, steps, output_path)
     print("Collecting allocations per core")
     allocations = allocate_per_core(groups_per_core, steps)
 
@@ -444,8 +445,8 @@ def compile_and_run(
         size = None if core == cluster_cores else l1_size
         print(f"Allocating for core {core} with size {size}")
         history = allocator.run_allocation(size, final_time)
-        os.makedirs("outputs/alloc", exist_ok=True)
-        history.plot_history(f"outputs/alloc/alloc_core_{core}_block.png", f"outputs/alloc/alloc_core_{core}_line.png")
+        os.makedirs(f"{output_path}/alloc", exist_ok=True)
+        history.plot_history(f"{output_path}/alloc/alloc_core_{core}_block.png", f"{output_path}/alloc/alloc_core_{core}_line.png")
 
     # TODO onnx is probably not necessary any more
     state = State(
@@ -486,14 +487,14 @@ def compile_and_run(
         stdout = result.stdout.decode("utf-8")
 
         print(stdout)
-        with open("outputs/stdout.txt", "w") as f:
+        with open(f"{output_path}/stdout.txt", "w") as f:
             f.write(stdout)
 
         result.check_returncode()
         profile = parse_profile_info(stdout)
 
         if plot:
-            plot_profile(profile, "outputs/profile.png", block=False)
+            plot_profile(profile, f"{output_path}/profile.png", block=False)
 
         return profile
 

@@ -1,8 +1,13 @@
+import os.path
+
+import networkx
 import onnx
 import torch
 from onnx import shape_inference
 
 from stream.classes.cost_model.cost_model import StreamCostModelEvaluation
+from stream.classes.hardware.architecture.communication_link import CommunicationLink
+from stream.classes.workload.computation_node import ComputationNode
 
 
 def sort_dict(d: dict, f: callable = lambda x: x):
@@ -66,8 +71,41 @@ def export_onnx(network, path):
 
     input = network.example_input()
     _ = network(input)
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.onnx.export(network, input, path)
 
     model = onnx.load_model(path)
     model_shaped = shape_inference.infer_shapes(model)
     onnx.save_model(model_shaped, path)
+
+
+def save_graph(graph, path: str, all_ranges: bool):
+    for (node, data) in graph.nodes(data=True):
+        node: ComputationNode
+        rows = ""
+
+        rows += f'<tr><td colspan="3"><b>{node}</b></td></tr>'
+        rows += f'<tr><td colspan="3">{type(node).__name__}</td></tr>'
+        rows += f"<tr><td>time</td><td>{node.start}</td><td>{node.end}</td></tr>"
+        for axis, (start, end) in node.loop_ranges.items():
+            if all_ranges:
+                plot_range = True
+            else:
+                const = True
+                for (other, other_data) in graph.nodes(data=True):
+                    if axis in other.loop_ranges and other.loop_ranges[axis] != (start, end):
+                        const = False
+                        break
+                plot_range = not const
+
+            if plot_range:
+                rows += f"<tr><td>{axis}</td><td>{start}</td><td>{end}</td></tr>"
+
+        data["label"] = f'<<table border="0">{rows}</table>>'
+
+    graph_dot = networkx.drawing.nx_pydot.to_pydot(graph)
+
+    print(f"Writing to {path}")
+    with open(path, "wb") as f:
+        f.write(graph_dot.create_svg())

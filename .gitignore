@@ -143,6 +143,7 @@ outputs*/*.json
 outputs*/*.png
 *.png
 
+stream/outputs
 
 # docs makefile and make.bat
 docs/Makefile
