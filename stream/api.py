@@ -32,7 +32,8 @@ class DebugStage(Stage):
             yield cme, extra_info
 
 
-def get_hardware_performance_stream(hardware, workload, mapping, CN_define_mode, hint_loops, node_hw_performances_path, output_path):
+def get_hardware_performance_stream(hardware, workload, mapping, CN_define_mode, hint_loops, node_hw_performances_path,
+                                    output_path):
     # Initialize the logger
     import logging as _logging
     _logging_level = _logging.INFO
@@ -195,45 +196,59 @@ def run_setup(setup: Setup, output_path: str):
         )
 
 
-def main():
-    # resnet18_section = ConvNetwork(depth=8, n=1, c=32, s=64)
-    resnet18_section = TestNetwork()
-
-    setup = Setup(
+def basic_setup(network):
+    return Setup(
         l1_size=0x00100000,
         l2_size=0x60000000,
         ima_width=256,
         ima_height=256,
-        cores=1,
-        network=resnet18_section,
-        hint_loops=[('OY', 4)],
+        cores=2,
+        network=network,
+        hint_loops=[],
     )
 
-    setup.cores = 4
+
+def main_single():
+    resnet18_section = TestNetwork()
+    setup = basic_setup(resnet18_section)
+    setup.hint_loops = [('OY', 4)]
+
     run_setup(setup, "outputs/resnet18_single")
 
-    # pred_latency = []
-    # actual_latency = []
-    # max_cores = 2
-    # core_values = list(range(1, max_cores + 1))
 
-    # for cores in core_values:
-    #     print(f"Running resnet18 split cores={cores}")
-    #     setup.cores = cores
-    #     setup.hint_loops = [('OY', 4)]
-    #     result = run_setup(setup, f"outputs/resnet18_split_{cores}")
-    #
-    #     pred_latency.append(result.predicted_latency)
-    #     actual_latency.append(result.actual_latency)
+def latency_mismatch_for_cores(setup, name: str, max_cores: int):
+    pred_latency = []
+    actual_latency = []
+    core_values = list(range(1, max_cores + 1))
 
-    # plt.figure()
-    # plt.plot(core_values, pred_latency, label="Predicted")
-    # plt.plot(core_values, actual_latency, label="Actual")
-    # plt.xlabel("Number of cores")
-    # plt.ylabel("Latency (cycles)")
-    # plt.legend()
-    # plt.show()
-    # plt.savefig("outputs/resnet18_split.png")
+    for cores in core_values:
+        print(f"Running split cores={cores}")
+        setup.cores = cores
+        result = run_setup(setup, f"outputs/{name}_{cores}")
+
+        pred_latency.append(result.predicted_latency)
+        actual_latency.append(result.actual_latency)
+
+    plt.figure()
+    plt.plot(core_values, pred_latency, label="Predicted")
+    plt.plot(core_values, actual_latency, label="Actual")
+    plt.xlabel("Number of cores")
+    plt.ylabel("Latency (cycles)")
+    plt.legend()
+    plt.show()
+    plt.savefig(f"outputs/{name}_latency.png")
+
+
+def main_latency_mismatch():
+    network = TestNetwork()
+    setup = basic_setup(network)
+    latency_mismatch_for_cores(setup, "mismatch", 8)
+
+
+def main():
+    # main_single()
+    # main_multiple()
+    main_latency_mismatch()
 
 
 if __name__ == "__main__":
