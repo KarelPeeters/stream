@@ -68,10 +68,10 @@ def get_memory_hierarchy(multiplier_array, width: int, height: int, weight_bits:
 
     # actual memories
     l1 = basic_memory_instance(
-        name="L1", size=0x00100000, r_bw=real_l12_bw, w_bw=real_l12_bw, r_port=2, w_port=2, rw_port=0,
+        name="L1", size=l1_size_bits, r_bw=real_l12_bw, w_bw=real_l12_bw, r_port=2, w_port=2, rw_port=0,
     )
     l2 = basic_memory_instance(
-        name="L2", size=0x60000000, r_bw=real_l12_bw, w_bw=real_l12_bw, r_port=2, w_port=2, rw_port=0,
+        name="L2", size=l2_size_bits, r_bw=real_l12_bw, w_bw=real_l12_bw, r_port=2, w_port=2, rw_port=0,
     )
 
     memory_hierarchy_graph = MemoryHierarchy(operational_array=multiplier_array)
