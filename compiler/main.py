@@ -232,6 +232,8 @@ def visit_conv(state: State, core: int, step_index: int, step: StepRunNode, orig
         group_place = state.placement_for_group_range(core, step_index, output_place.group,
                                                       output_place.group.loop_ranges)
 
+        # TODO reuse previous clearing?
+        # TODO only clear edges, not entire block?
         state.push_cycles(core, "start", "clear")
         state.push_operation(core, OperationMemClear(
             l1_base.offset(output_place.offset_core),
