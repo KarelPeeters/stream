@@ -188,6 +188,7 @@ class State:
 
         # TODO separate scratch per core, with the right size
         self.l2_scratch_space = Pointer("L2_SCRATCH", MemoryKind.L2)
+        self.l3_scratch_space = Pointer("L3_SCRATCH", MemoryKind.L3)
 
         self.simulated_constants = init_onnx_constants(onnx_model)
         self.simulated_values = {}
@@ -418,11 +419,20 @@ def generate_func_init(f, state: State):
         f.writeln("L3_BASE_INIT = l3_file_start;")
         f.writeln("L3_BASE_FINAL = l3_file_start + L3_SIZE;")
         f.writeln()
+
         f.writeln("if (pi_ram_alloc(ram_param, &L3_BASE, L3_SIZE)) {")
         with f:
-            f.writeln("printf(\"ERROR: Failed to allocate L3_DYN\\n\");")
+            f.writeln("printf(\"ERROR: Failed to allocate L3_BASE\\n\");")
             f.writeln("return -2;")
         f.writeln("}")
+
+        # TODO proper L3 scratch size
+        f.writeln("if (pi_ram_alloc(ram_param, &L3_SCRATCH, 1024*1024)) {")
+        with f:
+            f.writeln("printf(\"ERROR: Failed to allocate L3_SCRATCH\\n\");")
+            f.writeln("return -2;")
+        f.writeln("}")
+
         f.writeln()
         # copy the initial contents over
         f.writeln("pi_ram_copy_self(ram_param, L3_BASE, L3_BASE_INIT, L3_SIZE);")
@@ -584,6 +594,7 @@ def generate_data(f, state: State, d_bin):
     f.writeln("static u32 L3_BASE_INIT = 0;")
     f.writeln("static u32 L3_BASE_FINAL = 0;")
     f.writeln(f"#define L3_SIZE {l3_size}")
+    f.writeln("static u32 L3_SCRATCH = 0;")
 
     return outputs_to_check
 

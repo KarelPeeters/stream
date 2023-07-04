@@ -14,7 +14,7 @@ from compiler.data_type import DataType
 from compiler.ima_simulate import ima_matmul, ima_conv
 from compiler.operation import MemoryKind, Pointer, OperationMatmul, \
     OperationPad, OperationLockIncrement, OperationLockWait, \
-    OperationComment, OperationConvPadded, OperationMemClear, ProfileInfo
+    OperationComment, OperationConvPadded, OperationMemClear, ProfileInfo, OperationCopy
 from compiler.plot_profile import parse_profile_info, plot_profile, CollectedProfile
 from stream.classes.cost_model.cost_model import StreamCostModelEvaluation
 from stream.classes.cost_model.record import Step, StepRemoveTensorFromCore, StepRunNode, StepAddTensorToCore, \
@@ -284,32 +284,43 @@ def visit_step_transfer(state: State, step_index: int, step: StepTransferData):
     up = receiver == offchip_core
 
     if not (down ^ up):
-        lock_up_ready = state.new_lock()
-        lock_down_ready = state.new_lock()
+        lock_send = state.new_lock()
+        lock_fabric = state.new_lock()
+        lock_receive = state.new_lock()
 
         sender_l1 = placement_sender.offset(state.l1_base_core[sender])
         receiver_l1 = placement_receiver.offset(state.l1_base_core[receiver])
 
+        # TODO double-check correctness
         print(f"Warning: skipped transfer {step}")
         comment = OperationComment(f"Warning: probably incorrect transfer {step.tensor} {sender}->{receiver}")
 
         state.push_operation(sender, comment)
         state.push_cycles(sender, "start", "send")
         state.push_copy_tensor(sender, state.l2_scratch_space, sender_l1, placement_sender.tensor, False)
-        state.push_operation(sender, OperationLockIncrement(lock_up_ready))
-        state.push_operation(sender, OperationLockWait(lock_down_ready, 1))
+        state.push_operation(sender, OperationLockIncrement(lock_send))
+        state.push_operation(sender, OperationLockWait(lock_receive, 1))
         state.push_cycles(sender, "end", "send")
         state.push_operation(sender, OperationPad())
 
-        # TODO no fabric code?
+        # TODO proper fabric code
         state.push_operation(None, comment)
+        state.push_operation(None, OperationLockWait(lock_send, 1))
+        state.push_cycles(None, "start", "pass")
+        state.push_operation(None, OperationCopy(state.l3_scratch_space, state.l2_scratch_space, placement_sender.tensor.size_bytes))
+        state.push_operation(None, OperationCopy(state.l2_scratch_space, state.l3_scratch_space, placement_sender.tensor.size_bytes))
+        state.push_operation(None, OperationLockIncrement(lock_fabric))
+        state.push_operation(None, OperationLockWait(lock_receive, 1))
+        state.push_cycles(None, "end", "pass")
         state.push_operation(None, OperationPad())
 
         state.push_operation(receiver, comment)
+        # additional lock waiting to improve the profile plot
+        state.push_operation(receiver, OperationLockIncrement(lock_send))
         state.push_cycles(receiver, "start", "receive")
-        state.push_operation(receiver, OperationLockWait(lock_up_ready, 1))
+        state.push_operation(receiver, OperationLockWait(lock_fabric, 1))
         state.push_copy_tensor(receiver, state.l2_scratch_space, receiver_l1, placement_sender.tensor, True)
-        state.push_operation(receiver, OperationLockIncrement(lock_down_ready))
+        state.push_operation(receiver, OperationLockIncrement(lock_receive))
         state.push_cycles(receiver, "end", "receive")
         state.push_operation(receiver, OperationPad())
         return
