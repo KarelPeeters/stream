@@ -47,8 +47,8 @@ class TestNetwork(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv2d(c, c, 3, padding=1),
             nn.Conv2d(c, c, 3, padding=1),
-            nn.Conv2d(c, c, 3, padding=1),
-            nn.Conv2d(c, c, 3, padding=1),
+            # nn.Conv2d(c, c, 3, padding=1),
+            # nn.Conv2d(c, c, 3, padding=1),
             # nn.Conv2d(c, c, 3, padding=1),
             # nn.Conv2d(c, c, 3, padding=1),
             # nn.Conv2d(c, c, 3, padding=1),

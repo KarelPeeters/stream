@@ -68,7 +68,7 @@ def plot_profile(info: CollectedProfile, output_path: str, block: bool = True):
         return
 
     # plot slices
-    fig, axes = plt.subplots(nrows=len(info.core_slices), sharex="all", squeeze=False)
+    fig, axes = plt.subplots(nrows=len(info.core_slices), sharex="all", squeeze=False, figsize=(10, 7))
     axes = axes.squeeze(1)
 
     cmap = matplotlib.colormaps["tab10"]

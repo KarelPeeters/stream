@@ -186,6 +186,9 @@ class State:
         self.l2_base_core = [Pointer(f"L2_BASE_C{i}", MemoryKind.L2) for i in range(core_count)]
         self.l1_base_core = [Pointer(f"L1_BASE_C{i}", MemoryKind.L1) for i in range(core_count)]
 
+        # TODO separate scratch per core, with the right size
+        self.l2_scratch_space = Pointer("L2_SCRATCH", MemoryKind.L2)
+
         self.simulated_constants = init_onnx_constants(onnx_model)
         self.simulated_values = {}
 
@@ -566,6 +569,8 @@ def generate_data(f, state: State, d_bin):
     for i in range(state.core_count):
         core_l2_size = state.allocations.core_allocators[i].allocated_size_used
         f.writeln(f"static PI_L2 u8 L2_BASE_C{i}[{core_l2_size}];")
+    # TODO proper scratch size
+    f.writeln(f"static PI_L2 u8 L2_SCRATCH[1024*1024];")
     f.writeln()
 
     l3_size, data_init, data_final, outputs_to_check = determine_l3_data(state)

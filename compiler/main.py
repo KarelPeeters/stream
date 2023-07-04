@@ -284,19 +284,33 @@ def visit_step_transfer(state: State, step_index: int, step: StepTransferData):
     up = receiver == offchip_core
 
     if not (down ^ up):
-        lock = state.new_lock()
+        lock_up_ready = state.new_lock()
+        lock_down_ready = state.new_lock()
+
+        sender_l1 = placement_sender.offset(state.l1_base_core[sender])
+        receiver_l1 = placement_receiver.offset(state.l1_base_core[receiver])
 
         print(f"Warning: skipped transfer {step}")
-        comment = OperationComment(f"Warning: skipped transfer {step.tensor} {sender}->{receiver}")
+        comment = OperationComment(f"Warning: probably incorrect transfer {step.tensor} {sender}->{receiver}")
+
+        state.push_operation(sender, comment)
+        state.push_cycles(sender, "start", "send")
+        state.push_copy_tensor(sender, state.l2_scratch_space, sender_l1, placement_sender.tensor, False)
+        state.push_operation(sender, OperationLockIncrement(lock_up_ready))
+        state.push_operation(sender, OperationLockWait(lock_down_ready, 1))
+        state.push_cycles(sender, "end", "send")
+        state.push_operation(sender, OperationPad())
+
+        # TODO no fabric code?
         state.push_operation(None, comment)
         state.push_operation(None, OperationPad())
 
-        state.push_operation(sender, comment)
-        state.push_operation(sender, OperationLockIncrement(lock))
-        state.push_operation(sender, OperationPad())
-
         state.push_operation(receiver, comment)
-        state.push_operation(receiver, OperationLockWait(lock, 1))
+        state.push_cycles(receiver, "start", "receive")
+        state.push_operation(receiver, OperationLockWait(lock_up_ready, 1))
+        state.push_copy_tensor(receiver, state.l2_scratch_space, receiver_l1, placement_sender.tensor, True)
+        state.push_operation(receiver, OperationLockIncrement(lock_down_ready))
+        state.push_cycles(receiver, "end", "receive")
         state.push_operation(receiver, OperationPad())
         return
 
@@ -446,7 +460,8 @@ def compile_and_run(
         print(f"Allocating for core {core} with size {size}")
         history = allocator.run_allocation(size, final_time)
         os.makedirs(f"{output_path}/alloc", exist_ok=True)
-        history.plot_history(f"{output_path}/alloc/alloc_core_{core}_block.png", f"{output_path}/alloc/alloc_core_{core}_line.png")
+        history.plot_history(f"{output_path}/alloc/alloc_core_{core}_block.png",
+                             f"{output_path}/alloc/alloc_core_{core}_line.png")
 
     # TODO onnx is probably not necessary any more
     state = State(

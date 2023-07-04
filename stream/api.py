@@ -196,22 +196,25 @@ def run_setup(setup: Setup, output_path: str):
         )
 
 
-def basic_setup(network):
+def basic_setup(cores: int, hint_loops, network):
     return Setup(
         l1_size=0x00100000,
         l2_size=0x60000000,
         ima_width=256,
         ima_height=256,
-        cores=2,
+        cores=cores,
         network=network,
-        hint_loops=[],
+        hint_loops=hint_loops,
     )
 
 
 def main_single():
     resnet18_section = TestNetwork()
-    setup = basic_setup(resnet18_section)
-    setup.hint_loops = [('OY', 4)]
+    setup = basic_setup(
+        cores=2,
+        hint_loops=[],
+        network=resnet18_section
+    )
 
     run_setup(setup, "outputs/resnet18_single")
 
@@ -241,14 +244,18 @@ def latency_mismatch_for_cores(setup, name: str, max_cores: int):
 
 def main_latency_mismatch():
     network = TestNetwork()
-    setup = basic_setup(network)
+    setup = basic_setup(
+        cores=2,
+        hint_loops=[],
+        network=network,
+    )
     latency_mismatch_for_cores(setup, "mismatch", 8)
 
 
 def main():
-    # main_single()
+    main_single()
     # main_multiple()
-    main_latency_mismatch()
+    # main_latency_mismatch()
 
 
 if __name__ == "__main__":
