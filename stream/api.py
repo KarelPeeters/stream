@@ -1,3 +1,4 @@
+import json
 import os
 import pickle
 import random
@@ -70,7 +71,7 @@ def get_hardware_performance_stream(hardware, workload, mapping, CN_define_mode,
         plot_data_transfer=True,
         cn_define_mode=CN_define_mode,
         hint_loops=hint_loops,
-        scheduler_candidate_selection='memory',
+        scheduler_candidate_selection='latency',
         output_path=output_path,
     )
 
@@ -102,6 +103,22 @@ class SetupResult:
 
 
 def run_setup(setup: Setup, output_path: str):
+    result = run_setup_inner(setup, output_path)
+
+    plt.close("all")
+
+    if result is not None:
+        with open("results.txt", "w") as f:
+            d = {
+                "pred_latency": result.predicted_latency,
+                "actual_latency": result.actual_latency,
+            }
+            json.dump(d, f)
+
+    return result
+
+
+def run_setup_inner(setup: Setup, output_path: str):
     os.makedirs(output_path, exist_ok=True)
     random.seed(0xdeadbeef)
 
@@ -117,12 +134,12 @@ def run_setup(setup: Setup, output_path: str):
     )
     onnx_path = f"{output_path}/inputs/network.onnx"
 
-    mapping = 'inputs.testing.mapping.testing_mapping'
+    # mapping = 'inputs.testing.mapping.testing_mapping'
 
     network = setup.network
     export_onnx(network, onnx_path)
 
-    onnx_model_parser = ONNXModelParser(onnx_path, mapping, accelerator)
+    onnx_model_parser = ONNXModelParser(onnx_path, None, accelerator)
     onnx_model_parser.mapping = {'default': {'core_allocation': list(range(setup.cores))}}
     onnx_model_parser.run()
 
@@ -146,7 +163,7 @@ def run_setup(setup: Setup, output_path: str):
     scme, _ = get_hardware_performance_stream(
         accelerator,
         workload,
-        mapping,
+        None,
         CN_define_mode,
         setup.hint_loops,
         node_hw_performances_path,
@@ -204,61 +221,21 @@ def basic_setup(cores: int, hint_loops, network):
         l1_size=0x00100000,
         l2_size=0x60000000,
         ima_width=256,
-        ima_height=256,
+        ima_height=256 * 4,
         cores=cores,
         network=network,
         hint_loops=hint_loops,
     )
 
 
-def main_single():
-    resnet18_section = TestNetwork()
-    setup = basic_setup(
-        cores=2,
-        hint_loops=[],
-        network=resnet18_section
-    )
-
-    run_setup(setup, "outputs/resnet18_single")
-
-
-def latency_mismatch_for_cores(setup, name: str, max_cores: int):
-    pred_latency = []
-    actual_latency = []
-    core_values = list(range(1, max_cores + 1))
-
-    for cores in core_values:
-        print(f"Running split cores={cores}")
-        setup.cores = cores
-        result = run_setup(setup, f"outputs/{name}_{cores}")
-
-        pred_latency.append(result.predicted_latency)
-        actual_latency.append(result.actual_latency)
-
-    plt.figure()
-    plt.plot(core_values, pred_latency, label="Predicted")
-    plt.plot(core_values, actual_latency, label="Actual")
-    plt.xlabel("Number of cores")
-    plt.ylabel("Latency (cycles)")
-    plt.legend()
-    plt.show()
-    plt.savefig(f"outputs/{name}_latency.png")
-
-
-def main_latency_mismatch():
+def main():
     network = TestNetwork()
     setup = basic_setup(
         cores=2,
         hint_loops=[],
-        network=network,
+        network=network
     )
-    latency_mismatch_for_cores(setup, "mismatch", 8)
-
-
-def main():
-    main_single()
-    # main_multiple()
-    # main_latency_mismatch()
+    run_setup(setup, "outputs/api_test")
 
 
 if __name__ == "__main__":

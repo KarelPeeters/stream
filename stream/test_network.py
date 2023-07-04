@@ -2,6 +2,26 @@ import torch
 from torch import nn
 
 
+class SplitConvNetwork(nn.Module):
+    def __init__(self, depth: int, width: int, n: int, c: int, s: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.lines = nn.ModuleList([
+            nn.Sequential(
+                *(nn.Conv2d(c, c, 3, padding=1) for _ in range(depth))
+            )
+            for _ in range(width)
+        ])
+
+        self.input = torch.randn(n, c, s, s)
+
+    def forward(self, x):
+        outputs = [line(x) for line in self.lines]
+        return tuple(outputs)
+
+    def example_input(self):
+        return self.input
+
+
 class ConvNetwork(nn.Module):
     def __init__(self, depth: int, n: int, c: int, s: int, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -47,8 +67,8 @@ class TestNetwork(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv2d(c, c, 3, padding=1),
             nn.Conv2d(c, c, 3, padding=1),
-            # nn.Conv2d(c, c, 3, padding=1),
-            # nn.Conv2d(c, c, 3, padding=1),
+            nn.Conv2d(c, c, 3, padding=1),
+            nn.Conv2d(c, c, 3, padding=1),
             # nn.Conv2d(c, c, 3, padding=1),
             # nn.Conv2d(c, c, 3, padding=1),
             # nn.Conv2d(c, c, 3, padding=1),
