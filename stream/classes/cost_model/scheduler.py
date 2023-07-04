@@ -76,7 +76,10 @@ def schedule_graph(
             if (n.id[0] in sink_layers) and (n.produces_final_output is True)
         )
     )
-    output_nodes = {n for n in G.nodes() if n.produces_final_output is True}
+
+    # TODO fix this:
+    # output_nodes = {n for n in G.nodes() if n.produces_network_output is True}
+    output_nodes = {}
 
     # Get the offchip core id
     offchip_core_id = accelerator.offchip_core_id
