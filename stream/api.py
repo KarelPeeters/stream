@@ -139,6 +139,9 @@ def run_setup(setup: Setup, output_path: str):
     if os.path.exists(node_hw_performances_path):
         os.remove(node_hw_performances_path)
 
+    force_stagger_cores = False
+    os.environ["FORCE_STAGGER_CORES"] = str(force_stagger_cores)
+
     print("Running stream")
     scme, _ = get_hardware_performance_stream(
         accelerator,

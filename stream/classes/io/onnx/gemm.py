@@ -1,3 +1,5 @@
+import os
+
 from zigzag.classes.io.onnx.parser import Parser
 from zigzag.classes.io.onnx.utils import (
     get_node_input_output_dimension_shapes,
@@ -9,6 +11,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+next_alloc_i = 0
 
 class GemmParser(Parser):
     """Parses an ONNX Gemm operator into a LayerNode"""
@@ -44,6 +48,12 @@ class GemmParser(Parser):
             d["operand_precision"] = {'O': 8, 'O_final': 8, 'B': 4, 'A': 8}
 
             core_allocation = node_mapping["core_allocation"]
+
+            if os.environ.get("FORCE_STAGGER_CORES") == "True":
+                global next_alloc_i
+                core_allocation = [core_allocation[next_alloc_i % len(core_allocation)]]
+                next_alloc_i += 1
+
             d["core_allocation"] = core_allocation
 
             spatial_mapping = self.get_spatial_mappings(

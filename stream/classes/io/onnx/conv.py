@@ -1,3 +1,4 @@
+import os
 from math import ceil
 
 from zigzag.classes.io.onnx.parser import Parser
@@ -12,6 +13,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+next_alloc_i = 0
 
 class ConvParser(Parser):
     """Parser for ONNX Conv and QLinearConv nodes into LayerNode."""
@@ -113,6 +115,12 @@ class ConvParser(Parser):
             # d["constant_operands"] =  ['W']
 
             core_allocation = node_mapping["core_allocation"]
+
+            if os.environ.get("FORCE_STAGGER_CORES") == "True":
+                global next_alloc_i
+                core_allocation = [core_allocation[next_alloc_i % len(core_allocation)]]
+                next_alloc_i += 1
+
             d["core_allocation"] = core_allocation
 
             spatial_mapping = self.get_spatial_mappings(
