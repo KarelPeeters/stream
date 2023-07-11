@@ -4,13 +4,13 @@ import pickle
 import random
 import re
 from dataclasses import dataclass
-from typing import Generator
+from typing import Generator, List
 
 from matplotlib import pyplot as plt
 from torch import nn
 from zigzag.classes.stages import *
 
-from compiler.main import compile_and_run
+from compiler.main import compile_and_run, CollectedInfo
 from stream.api_util import export_onnx, print_workload_per_core, save_graph
 from stream.classes.io.onnx.model import ONNXModelParser
 from stream.classes.stages import *
@@ -61,8 +61,8 @@ def get_hardware_performance_stream(hardware, workload, mapping, CN_define_mode,
         workload=workload,  # required by ModelParserStage
         mapping_path=mapping,  # required by ModelParserStage
         loma_lpf_limit=6,  # required by LomaStage
-        nb_ga_individuals=4,  # number of individuals in each genetic algorithm generation
-        nb_ga_generations=16,  # number of genetic algorithm generations
+        nb_ga_individuals=64,  # number of individuals in each genetic algorithm generation
+        nb_ga_generations=64,  # number of genetic algorithm generations
         node_hw_performances_path=node_hw_performances_path,
         # saved node_hw_performances to skip re-computation
         plot_hof=True,  # Save schedule and memory usage plot of each individual in the Genetic Algorithm hall of fame
@@ -99,7 +99,8 @@ class Setup:
 @dataclass
 class SetupResult:
     predicted_latency: float
-    actual_latency: float
+    predicted_peak_mem: List[int]
+    info: CollectedInfo
 
 
 def run_setup(setup: Setup, output_path: str):
@@ -108,12 +109,16 @@ def run_setup(setup: Setup, output_path: str):
     plt.close("all")
 
     if result is not None:
-        with open("results.txt", "w") as f:
+        with open(f"{output_path}/results.txt", "w") as f:
             d = {
                 "pred_latency": result.predicted_latency,
-                "actual_latency": result.actual_latency,
+                "actual_latency": result.info.profile.latency,
             }
             json.dump(d, f)
+
+    print(result)
+    with open(f"{output_path}/log.txt", "w") as f:
+        print(result, file=f)
 
     return result
 
@@ -182,6 +187,7 @@ def run_setup_inner(setup: Setup, output_path: str):
 
     print_workload_per_core(scme[0])
 
+    predicted_peak_mem = None
     if plot_stream:
         draw_dependencies = True
         plot_data_transfer = True
@@ -193,7 +199,7 @@ def run_setup_inner(setup: Setup, output_path: str):
         with plt.rc_context():
             plot_timeline_brokenaxes(scme[0], draw_dependencies, section_start_percent,
                                      percent_shown, plot_data_transfer, fig_path=timeline_fig_path)
-        plot_memory_usage(scme[0], fig_path=memory_fig_path)
+        predicted_peak_mem = plot_memory_usage(scme[0], fig_path=memory_fig_path)
         bar_plot_stream_cost_model_evaluations_breakdown([scme], fig_path=energy_fig_path)
 
     if generate:
@@ -202,7 +208,7 @@ def run_setup_inner(setup: Setup, output_path: str):
 
         pulp_sdk_path = r"~/new-attempt/pulp-sdk"
         project_path = r"~/new-attempt/pulp-sdk/applications/custom"
-        profile = compile_and_run(
+        info = compile_and_run(
             onnx_path, scme[0], node_hw_performances,
             pulp_sdk_path, project_path,
             l1_size=setup.l1_size, l2_size=setup.l2_size,
@@ -212,7 +218,8 @@ def run_setup_inner(setup: Setup, output_path: str):
 
         return SetupResult(
             predicted_latency=scme[0].latency,
-            actual_latency=profile.latency,
+            predicted_peak_mem=predicted_peak_mem,
+            info=info,
         )
 
 

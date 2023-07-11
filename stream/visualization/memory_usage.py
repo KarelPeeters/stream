@@ -93,6 +93,7 @@ def plot_memory_usage(
     fig.suptitle("Memory usage through time (Bytes)")
 
     peak_usages_bytes = {}
+    peak_usage_per_core = []
     for (
         ax,
         (ti_cores, cores_for_this_ti),
@@ -109,6 +110,7 @@ def plot_memory_usage(
         stored_bytes = ti_cumsum_bytes[:, 1]
         peak_usage_bytes = max(stored_bytes)
         peak_usages_bytes[ti] = peak_usage_bytes
+        peak_usage_per_core.append(peak_usage_bytes)
         if not peak_usage_bytes > 0:
             continue  # Happens for weight memory on pooling core because it's encoded as zero bit
         assert (
@@ -170,3 +172,5 @@ def plot_memory_usage(
     # plt.show(block=True)
     fig.savefig(fig_path)
     print(f"Saved memory usage fig to {fig_path}")
+
+    return peak_usage_per_core

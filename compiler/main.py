@@ -1,7 +1,8 @@
 import os
 import random
 import subprocess
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, List
 
 import numpy as np
 import onnx
@@ -309,8 +310,10 @@ def visit_step_transfer(state: State, step_index: int, step: StepTransferData):
         state.push_operation(None, comment)
         state.push_operation(None, OperationLockWait(lock_send, 1))
         state.push_cycles(None, "start", "pass")
-        state.push_operation(None, OperationCopy(state.l3_scratch_space, state.l2_scratch_space, placement_sender.tensor.size_bytes))
-        state.push_operation(None, OperationCopy(state.l2_scratch_space, state.l3_scratch_space, placement_sender.tensor.size_bytes))
+        state.push_operation(None, OperationCopy(state.l3_scratch_space, state.l2_scratch_space,
+                                                 placement_sender.tensor.size_bytes))
+        state.push_operation(None, OperationCopy(state.l2_scratch_space, state.l3_scratch_space,
+                                                 placement_sender.tensor.size_bytes))
         state.push_operation(None, OperationLockIncrement(lock_fabric))
         state.push_operation(None, OperationLockWait(lock_receive, 1))
         state.push_cycles(None, "end", "pass")
@@ -440,13 +443,20 @@ def visit_step(state: State, step_index: int, step: Step):
         assert False, f"Unknown step type {step}"
 
 
+@dataclass
+class CollectedInfo:
+    profile: CollectedProfile
+    l1_peak: List[int]
+    l1_peak_dense: List[int]
+
+
 def compile_and_run(
         onnx_path, scme: StreamCostModelEvaluation, node_hw_performances,
         pulp_sdk_path, project_path,
         l1_size: int, l2_size: int,
         simulate: bool, run: bool, plot: bool,
         output_path: str,
-) -> Optional[CollectedProfile]:
+) -> Optional[CollectedInfo]:
     random.seed(0xdeadbeef)
     np.random.seed(0xdeadbeef)
 
@@ -468,13 +478,20 @@ def compile_and_run(
     allocations = allocate_per_core(groups_per_core, steps)
 
     final_time = max(step.time_end for step in steps)
+
+    l1_core_size_used = []
+    l1_core_size_used_dense = []
     for core, allocator in enumerate(allocations.core_allocators):
         size = None if core == cluster_cores else l1_size
         print(f"Allocating for core {core} with size {size}")
         history = allocator.run_allocation(size, final_time)
         os.makedirs(f"{output_path}/alloc", exist_ok=True)
-        history.plot_history(f"{output_path}/alloc/alloc_core_{core}_block.png",
-                             f"{output_path}/alloc/alloc_core_{core}_line.png")
+        history.plot_history(
+            f"{output_path}/alloc/alloc_core_{core}_block.png",
+            f"{output_path}/alloc/alloc_core_{core}_line.png"
+        )
+        l1_core_size_used.append(history.size_used)
+        l1_core_size_used_dense.append(history.size_used_dense)
 
     # TODO onnx is probably not necessary any more
     state = State(
@@ -524,6 +541,7 @@ def compile_and_run(
         if plot:
             plot_profile(profile, f"{output_path}/profile.png", block=False)
 
-        return profile
+        info = CollectedInfo(profile=profile, l1_peak=l1_core_size_used, l1_peak_dense=l1_core_size_used_dense)
+        return info
 
     return None

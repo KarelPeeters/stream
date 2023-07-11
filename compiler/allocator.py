@@ -65,6 +65,8 @@ def plot_mem_line(ax, timestamps, y, y_size, style: str, va: str):
 class AllocationHistory:
     size: Optional[int]
     size_used: int
+
+    size_used_dense: int
     history: List[Tuple[float, List[Tuple[int, int]]]]
 
     def plot_history(self, block_path: Optional[str], line_path: Optional[str]):
@@ -173,6 +175,8 @@ class TimeAllocator:
         # loop over potential event times
         history.append((self.start_time, list(free_segments)))
         size_used = 0
+        size_used_dense = 0
+        curr_size_used_dense = 0
 
         for t in times:
             print(f"T={t}, free_segments={free_segments}")
@@ -185,6 +189,7 @@ class TimeAllocator:
                         if seg_end is None or (seg_end - seg_start) >= token.size:
                             token.offset = seg_start
                             size_used = max(size_used, seg_start + token.size)
+                            curr_size_used_dense += token.size
 
                             if seg_end is not None and (seg_end - seg_start) == token.size:
                                 free_segments.pop(seg_index)
@@ -195,11 +200,14 @@ class TimeAllocator:
                     else:
                         raise ValueError(f"Failed to allocate {token}")
 
-            # free old tensors (after allocating new ones, just be extre safe there's no overlap)
+            size_used_dense = max(size_used_dense, curr_size_used_dense)
+
+            # free old tensors (after allocating new ones, just be extra safe there's no overlap)
             for token in self.tokens:
                 if token.time_end == t:
                     print(f"Freeing token {token.index}")
                     new_segment = (token.offset, token.offset + token.size)
+                    curr_size_used_dense -= token.size
 
                     # insert new segment at the right spot
                     for (seg_index, (seg_start, seg_end)) in enumerate(free_segments):
@@ -221,7 +229,7 @@ class TimeAllocator:
             history.append((t, list(free_segments)))
 
         self.allocated_size_used = size_used
-        return AllocationHistory(size, size_used, history)
+        return AllocationHistory(size=size, size_used=size_used, size_used_dense=size_used_dense, history=history)
 
 
 def main():

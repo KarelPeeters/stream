@@ -16,6 +16,9 @@ class CollectedProfile:
 
     latency: int
 
+    def __str__(self):
+        return f"CollectedProfile(latency={self.latency}, ...)"
+
 
 def parse_profile_info(stdout: str) -> CollectedProfile:
     core_slices = {}
