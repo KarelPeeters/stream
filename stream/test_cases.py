@@ -116,12 +116,12 @@ def main():
     # for i in range(1, 8+1):
     #     main_full(i)
 
-    # main_full(4)
+    main_full(4)
 
     # main_pipeline()
 
-    main_trivial()
-    main_trivial2()
+    # main_trivial()
+    # main_trivial2()
 
     # main_latency_mismatch()
 

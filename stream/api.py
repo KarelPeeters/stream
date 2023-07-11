@@ -19,6 +19,7 @@ from stream.inputs.testing.hardware.custom.ima import ima_with_offchip
 from stream.test_network import TestNetwork
 from stream.visualization.memory_usage import plot_memory_usage
 from stream.visualization.plot_scme import bar_plot_stream_cost_model_evaluations_breakdown
+from stream.visualization.schedule import visualize_timeline_plotly
 
 
 class DebugStage(Stage):
@@ -191,9 +192,11 @@ def run_setup_inner(setup: Setup, output_path: str):
     if plot_stream:
         draw_dependencies = True
         plot_data_transfer = True
+        draw_communication = True
         section_start_percent = (0,)
         percent_shown = (100,)
         timeline_fig_path = f"{output_path}/schedule_plot.png"
+        timeline_fig_path_plotly = f"{output_path}/schedule_plot.html"
         memory_fig_path = f"{output_path}/memory_plot.png"
         energy_fig_path = f"{output_path}/energy_plot.png"
         with plt.rc_context():
@@ -201,6 +204,7 @@ def run_setup_inner(setup: Setup, output_path: str):
                                      percent_shown, plot_data_transfer, fig_path=timeline_fig_path)
         predicted_peak_mem = plot_memory_usage(scme[0], fig_path=memory_fig_path)
         bar_plot_stream_cost_model_evaluations_breakdown([scme], fig_path=energy_fig_path)
+        visualize_timeline_plotly(scme[0], draw_dependencies, draw_communication, fig_path=timeline_fig_path_plotly)
 
     if generate:
         with open(node_hw_performances_path, "rb") as f:
