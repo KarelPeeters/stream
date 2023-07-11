@@ -14,8 +14,13 @@ def main_full(cores: int):
         hint_loops=[],
         network=network
     )
+    setup.generate = False
 
-    run_setup(setup, f"outputs/split_{cores}")
+    # setup.force_stagger_cores = False
+    # run_setup(setup, f"outputs/full_basic_{cores}")
+
+    setup.force_stagger_cores = True
+    run_setup(setup, f"outputs/full_basic_stagger_{cores}")
 
 
 def main_pipeline():

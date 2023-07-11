@@ -96,6 +96,11 @@ class Setup:
 
     hint_loops: list[tuple[str, int]]
 
+    force_stagger_cores: bool
+    generate: bool
+    simulate: bool
+    run: bool
+
 
 @dataclass
 class SetupResult:
@@ -128,6 +133,7 @@ def run_setup_inner(setup: Setup, output_path: str):
     os.makedirs(output_path, exist_ok=True)
     random.seed(0xdeadbeef)
 
+    os.environ["FORCE_STAGGER_CORES"] = str(setup.force_stagger_cores)
     CN_define_mode = 1
 
     # TODO use weight_size=4 at some point
@@ -162,9 +168,6 @@ def run_setup_inner(setup: Setup, output_path: str):
     if os.path.exists(node_hw_performances_path):
         os.remove(node_hw_performances_path)
 
-    force_stagger_cores = False
-    os.environ["FORCE_STAGGER_CORES"] = str(force_stagger_cores)
-
     print("Running stream")
     scme, _ = get_hardware_performance_stream(
         accelerator,
@@ -180,9 +183,6 @@ def run_setup_inner(setup: Setup, output_path: str):
 
     # TODO clean up plotting bools and blocking
     # TODO why does simulate false cause out-of-bounds RAM errors?
-    generate = True
-    simulate = False
-    run = True
     plot_stream = True
     plot_profile = True
 
@@ -206,7 +206,7 @@ def run_setup_inner(setup: Setup, output_path: str):
         bar_plot_stream_cost_model_evaluations_breakdown([scme], fig_path=energy_fig_path)
         visualize_timeline_plotly(scme[0], draw_dependencies, draw_communication, fig_path=timeline_fig_path_plotly)
 
-    if generate:
+    if setup.generate:
         with open(node_hw_performances_path, "rb") as f:
             node_hw_performances = pickle.load(file=f)
 
@@ -216,7 +216,7 @@ def run_setup_inner(setup: Setup, output_path: str):
             onnx_path, scme[0], node_hw_performances,
             pulp_sdk_path, project_path,
             l1_size=setup.l1_size, l2_size=setup.l2_size,
-            simulate=simulate, run=run, plot=plot_profile,
+            simulate=setup.simulate, run=setup.run, plot=plot_profile,
             output_path=f"{output_path}/",
         )
 
@@ -236,6 +236,10 @@ def basic_setup(cores: int, hint_loops, network):
         cores=cores,
         network=network,
         hint_loops=hint_loops,
+        force_stagger_cores=False,
+        generate=True,
+        simulate=False,
+        run=True,
     )
 
 
