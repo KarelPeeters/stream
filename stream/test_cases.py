@@ -1,4 +1,6 @@
+import torch
 from matplotlib import pyplot as plt
+from torch import nn
 
 from stream.api import basic_setup, run_setup
 from stream.test_network import SplitConvNetwork
@@ -115,13 +117,40 @@ def main_cn_splitting():
     plt.show()
 
 
+class ReuseNetwork(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.conv1 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
+
+    def example_input(self):
+        return torch.randn(1, 16, 64, 64)
+
+    def forward(self, x):
+        y = self.conv1(x)
+        z = self.conv1(y)
+        return y, z
+
+
+def simple_reuse():
+    network = ReuseNetwork()
+    setup = basic_setup(
+        cores=1,
+        hint_loops=[],
+        network=network,
+    )
+    run_setup(setup, "outputs/reuse")
+
+
 def main():
     # main_single()
 
     # for i in range(1, 8+1):
     #     main_full(i)
 
-    main_full(4)
+    # main_full(4)
+    simple_reuse()
 
     # main_pipeline()
 
