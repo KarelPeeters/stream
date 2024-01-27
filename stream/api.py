@@ -61,9 +61,9 @@ def get_hardware_performance_stream(hardware, workload, mapping, CN_define_mode,
         # workload_path=workload,  # required by ModelParserStage
         workload=workload,  # required by ModelParserStage
         mapping_path=mapping,  # required by ModelParserStage
-        loma_lpf_limit=6,  # required by LomaStage
-        nb_ga_individuals=64,  # number of individuals in each genetic algorithm generation
-        nb_ga_generations=64,  # number of genetic algorithm generations
+        loma_lpf_limit=1,  # required by LomaStage
+        nb_ga_individuals=16,  # number of individuals in each genetic algorithm generation
+        nb_ga_generations=32,  # number of genetic algorithm generations
         node_hw_performances_path=node_hw_performances_path,
         # saved node_hw_performances to skip re-computation
         plot_hof=True,  # Save schedule and memory usage plot of each individual in the Genetic Algorithm hall of fame
@@ -130,6 +130,8 @@ def run_setup(setup: Setup, output_path: str):
 
 
 def run_setup_inner(setup: Setup, output_path: str):
+    print(f"Running setup with output path '{output_path}'")
+
     os.makedirs(output_path, exist_ok=True)
     random.seed(0xdeadbeef)
 
@@ -232,7 +234,7 @@ def basic_setup(cores: int, hint_loops, network):
         l1_size=0x00100000,
         l2_size=0x60000000,
         ima_width=256,
-        ima_height=256 * 4,
+        ima_height=128*3*3,
         cores=cores,
         network=network,
         hint_loops=hint_loops,

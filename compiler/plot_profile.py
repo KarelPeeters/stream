@@ -74,8 +74,12 @@ def plot_profile(info: CollectedProfile, output_path: str, block: bool = True):
     fig, axes = plt.subplots(nrows=len(info.core_slices), sharex="all", squeeze=False, figsize=(10, 7))
     axes = axes.squeeze(1)
 
+    names = ["down", "clear", "calc", "up", "plot conv", "config conv", "ima conv", "pass", "send", "receive"]
+    for n in info.names:
+        assert n in names, f"Mismatched name {n}"
+
     cmap = matplotlib.colormaps["tab10"]
-    name_colors = {name: cmap(i) for i, name in enumerate(info.names)}
+    name_colors = {name: cmap(i) for i, name in enumerate(names)}
 
     for i, (core, slices) in enumerate(info.core_slices.items()):
         used_names = {}
@@ -101,7 +105,8 @@ def main():
     # path = "../stream/outputs/stdout.txt"
     # output_path = "../stream/outputs/profile.png"
 
-    path = r"\\wsl.localhost\Ubuntu\home\karel\new-attempt\pulp-sdk\applications\custom\log.txt"
+    # path = r"\\wsl.localhost\Ubuntu\home\karel\new-attempt\pulp-sdk\applications\custom\log.txt"
+    path = r"C:\Documents\School\Unief\M3\Thesis\Projects\stream\stream\outputs\pipeline\stdout.txt"
     output_path = "profile.png"
 
     with open(path, "r") as f:

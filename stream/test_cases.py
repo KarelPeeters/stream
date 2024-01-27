@@ -8,7 +8,7 @@ from stream.test_network import SplitConvNetwork
 
 def main_full(cores: int):
     network = SplitConvNetwork(
-        depth=8, width=cores,
+        depth=4, width=cores,
         n=1, c=16, s=32
     )
     setup = basic_setup(
@@ -16,13 +16,13 @@ def main_full(cores: int):
         hint_loops=[],
         network=network
     )
-    setup.generate = False
+    # setup.generate = False
 
-    # setup.force_stagger_cores = False
-    # run_setup(setup, f"outputs/full_basic_{cores}")
+    setup.force_stagger_cores = False
+    run_setup(setup, f"outputs/full_basic_{cores}")
 
-    setup.force_stagger_cores = True
-    run_setup(setup, f"outputs/full_basic_stagger_{cores}")
+    # setup.force_stagger_cores = True
+    # run_setup(setup, f"outputs/full_basic_stagger_{cores}")
 
 
 def main_pipeline():
@@ -94,7 +94,7 @@ def main_latency_mismatch():
 def main_cn_splitting():
     size = 64
 
-    network = SplitConvNetwork(8, 1, 1, 16, size)
+    network = SplitConvNetwork(8, 1, 1, 64, size)
 
     splits = [1, 2, 4, 8, 16, 32]
     pred_latencies = []
@@ -121,11 +121,11 @@ class ReuseNetwork(nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.conv1 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
 
     def example_input(self):
-        return torch.randn(1, 16, 64, 64)
+        return torch.randn(1, 64, 64, 64)
 
     def forward(self, x):
         y = self.conv1(x)
@@ -145,20 +145,21 @@ def simple_reuse():
 
 def main():
     # main_single()
-
+    #
     # for i in range(1, 8+1):
     #     main_full(i)
-
-    # main_full(4)
-    simple_reuse()
-
-    # main_pipeline()
-
+    #
+    # main_full(8)
+    # main_full(2)
+    # simple_reuse()
+    #
+    main_pipeline()
+    #
     # main_trivial()
     # main_trivial2()
-
+    #
     # main_latency_mismatch()
-
+    #
     # main_cn_splitting()
 
 

@@ -4,13 +4,15 @@ import re
 import numpy as np
 from matplotlib import pyplot as plt
 
+from stream.ext.util import plot_font_size
+
 # "502x32x184 ima total 47713 plot 41979 job 5562"
 pattern = re.compile(r"^(\d+)x(\d+)x(\d+) ima total (\d+) plot (\d+) job (\d+)$")
 
 
 def main():
     # path = r"\\wsl.localhost\Ubuntu\home\karel\new-attempt\pulp-sdk\applications\custom\log_ima_profile.txt"
-    path = r"\\wsl.localhost\Ubuntu\home\karel\new-attempt\pulp-sdk\applications\custom\log.txt"
+    path = r"\\wsl.localhost\Ubuntu\home\karel\new-attempt\pulp-sdk\applications\custom\log_ima_profile.txt"
 
     data = []
 
@@ -37,6 +39,15 @@ def main():
 
     print("Min job cycles: ", np.min(cycles_job))
 
+    mask = b == 8
+    data = data[mask]
+    b = b[mask]
+    k = k[mask]
+    c = c[mask]
+    cycles_total = cycles_total[mask]
+    cycles_plot = cycles_plot[mask]
+    cycles_job = cycles_job[mask]
+
     # for 16x16: 41 + 9*b
 
     # plt.figure()
@@ -58,6 +69,7 @@ def main():
     # plt.show()
 
     b = np.unique(b)
+    print(b)
     assert len(b) == 1
     b = b[0]
 
@@ -73,10 +85,20 @@ def main():
     with open("ima_profile.json", "w") as f:
         json.dump(json_data, f)
 
-    for factor in np.unique(((cycles_job - 41) / b + 0.5).astype(int)):
-        mask = ((cycles_job - 41) / b + 0.5).astype(int) == factor,
-        plt.scatter(k[mask], c[mask], s=128, marker="s", label=f"{factor}")
-    plt.legend()
+    # for factor in np.unique(((cycles_job - 41) / b + 0.5).astype(int)):
+    #     mask = ((cycles_job - 41) / b + 0.5).astype(int) == factor
+    #     print(f"Factor {factor}, values: {((cycles_job - 41) / b + 0.5)[mask]}")
+    #     plt.scatter(k[mask], c[mask], s=128, marker="s", label=f"{factor}")
+
+
+    plot_font_size()
+    factor = (cycles_job - 41) / b
+    plt.scatter(x=c, y=k, c=factor, s=128, marker="s")
+    plt.colorbar()
+    # plt.legend()
+    plt.ylabel("K")
+    plt.xlabel("C")
+    plt.title("Latency per Step")
     plt.show()
 
     # labels = []

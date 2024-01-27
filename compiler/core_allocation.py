@@ -270,8 +270,8 @@ def collect_tensor_groups(cores: int, steps: List[Step], output_path: str) -> Li
         ]
         core_tensors = sorted(core_tensors, key=lambda x: core_groups.get_group(core_groups.key_to_tensor[x[0]]).index)
 
-        os.makedirs(f"{output_path}/tensor_core_life", exist_ok=True)
-        plot_path = f"{output_path}/tensor_core_life/tensor_core_life_{core_id}.png"
+        os.makedirs(f"{output_path}/alloc", exist_ok=True)
+        plot_path = f"{output_path}/alloc/tensor_core_life_{core_id}.png"
 
         if len(core_tensors) == 0:
             try:
