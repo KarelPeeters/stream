@@ -1,8 +1,9 @@
 import random
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Optional, List
 
 import matplotlib.pyplot as plt
+from ortools.linear_solver import pywraplp
 
 from stream.visualization.memory_usage import humanbytes, BIGGER_SIZE
 
@@ -61,83 +62,16 @@ def plot_mem_line(ax, timestamps, y, y_size, style: str, va: str):
     )
 
 
-@dataclass
-class AllocationHistory:
-    size: Optional[int]
-    size_used: int
-
-    size_used_dense: int
-    history: List[Tuple[float, List[Tuple[int, int]]]]
-
-    def plot_history(self, block_path: Optional[str], line_path: Optional[str]):
-        plot_size = self.size if self.size is not None else self.size_used
-
-        # plot patch
-        ax = plt.figure(figsize=(16, 16)).gca()
-        ax.set_xlim(0, self.history[-1][0])
-        ax.set_ylim(0, plot_size * 1.2)
-
-        timestamps = []
-        mem_used_dense = []
-
-        for i, (time_start, free_segments) in enumerate(self.history):
-            if i < len(self.history) - 1:
-                time_delta = self.history[i + 1][0] - time_start
-            else:
-                time_delta = 1
-
-            print(f"Plotting time {time_start}..{time_start + time_delta}: {free_segments}")
-
-            prev_end = 0
-            for (start, end) in free_segments:
-                if start != prev_end:
-                    ax.add_patch(plt.Rectangle((time_start, prev_end), time_delta, start - prev_end, color='r'))
-
-                if end is None:
-                    end = plot_size
-
-                ax.add_patch(plt.Rectangle((time_start, start), time_delta, end - start, color='g'))
-                prev_end = end
-
-            if prev_end != plot_size:
-                ax.add_patch(
-                    plt.Rectangle((time_start, prev_end), time_delta, self.size - prev_end, color='r'))
-
-            timestamps.append(time_start)
-            mem_free = sum((end if end is not None else plot_size) - start for start, end in free_segments)
-            mem_used_dense.append(plot_size - mem_free)
-
-        if not (any(x > 0 for x in mem_used_dense)):
-            plt.close()
-            return
-
-        if block_path is None:
-            plt.show()
-        else:
-            plt.savefig(block_path)
-        plt.close()
-
-        ax = plt.figure().gca()
-        plt.plot(timestamps, mem_used_dense, drawstyle="steps-post")
-        plot_mem_line(ax, timestamps, max(mem_used_dense), self.size, "dotted", "top")
-        plot_mem_line(ax, timestamps, self.size_used, self.size, "dashed", "bottom")
-
-        if line_path is None:
-            plt.show()
-        else:
-            plt.savefig(line_path)
-        plt.close()
-
-
-class TimeAllocator:
+class AllocationProblem:
     def __init__(self, start_time: float):
         self.check = random.randint(0, 2 ** 32)
         self.tokens = []
 
         self.start_time = start_time
+        self.final_time = None
+        self.available_size = None
 
         self.allocated = False
-        self.allocated_size = None
         self.allocated_size_used = None
 
     def alloc(self, size: int, time: float) -> Token:
@@ -153,23 +87,86 @@ class TimeAllocator:
         assert token.time_end is None
         token.time_end = time
 
-    # TODO use a better memory allocation algorithm for this
-    def run_allocation(self, size: Optional[int], final_time: float) -> AllocationHistory:
-        assert not self.allocated, "Allocation has already happened"
-        self.allocated_size = size
+    def set_final_time(self, time: float):
+        assert self.final_time is None, "Final time has already been set"
+        self.final_time = time
 
         # free all remaining tokens
         for token in self.tokens:
+            assert time >= token.time_start and (token.time_end is None or time >= token.time_end)
             if token.time_end is None:
-                self.free(token, final_time)
+                self.free(token, self.final_time)
 
-        free_segments = [(0, size)]
+    def set_available_size(self, size: int):
+        assert self.available_size is None, "Available size has already been set"
+        self.available_size = size
+
+    def all_times(self) -> List[float]:
+        result = {self.start_time, self.final_time}
+        for token in self.tokens:
+            result.add(token.time_start)
+            result.add(token.time_end)
+        if None in result:
+            result.remove(None)
+        return sorted(result)
+
+    def plot_solved(self, block_path: Optional[str], line_path: Optional[str]):
+        assert self.allocated
+
+        # Patched plot
+        plot_size = self.available_size if self.available_size is not None else self.allocated_size_used
+
+        ax = plt.figure(figsize=(16, 16)).gca()
+        ax.set_xlim(0, self.final_time)
+        ax.set_ylim(0, plot_size * 1.2)
+
+        ax.add_patch(plt.Rectangle((self.start_time, 0), self.final_time - self.start_time, plot_size, color='g'))
+
+        for token in self.tokens:
+            ax.add_patch(plt.Rectangle(
+                (token.time_start, token.offset),
+                token.time_end - token.time_start,
+                token.size,
+                color='r'
+            ))
+
+        if block_path is None:
+            plt.show(block=False)
+        else:
+            plt.savefig(block_path)
+            plt.close()
+
+        # Line plot
+        ax = plt.figure().gca()
+
+        timestamps = self.all_times()
+        mem_used_dense = [
+            sum(token.size for token in self.tokens if token.time_start <= time < token.time_end)
+            for time in timestamps
+        ]
+
+        plt.plot(timestamps, mem_used_dense, drawstyle="steps-post")
+        plot_mem_line(ax, timestamps, max(mem_used_dense), self.available_size, "dotted", "top")
+        plot_mem_line(ax, timestamps, self.allocated_size_used, self.available_size, "dashed", "bottom")
+
+        if line_path is None:
+            plt.show()
+        else:
+            plt.savefig(line_path)
+            plt.close()
+
+    # TODO use a better memory allocation algorithm for this
+    def run_allocation(self) -> AllocationHistory:
+        assert not self.allocated, "Allocation has already happened"
+        assert self.final_time is not None, "Final time has not been set"
+
+        free_segments = [(0, self.available_size)]
         history = []
 
         # find all distinct time points
         times_set = set(t for token in self.tokens for t in (token.time_start, token.time_end) if t is not None)
         times_set.add(self.start_time)
-        times_set.add(final_time)
+        times_set.add(self.final_time)
         times = sorted(times_set)
 
         # loop over potential event times
@@ -229,11 +226,69 @@ class TimeAllocator:
             history.append((t, list(free_segments)))
 
         self.allocated_size_used = size_used
-        return AllocationHistory(size=size, size_used=size_used, size_used_dense=size_used_dense, history=history)
+        self.allocated = True
+
+        return AllocationHistory(size=self.available_size, size_used=size_used, size_used_dense=size_used_dense,
+                                 history=history)
+
+    def solve_allocation_perfect(self):
+        EPSILON = 1e-10
+        solver = pywraplp.Solver.CreateSolver("SAT")
+
+        # create all variables
+        token_var_pairs = []
+
+        # todo only use overlapping tokens for this
+        worst_case_size = sum(token.size for token in self.tokens)
+
+        var_mem_used = solver.IntVar(0, worst_case_size, "mem_used")
+
+        for ai, token in enumerate(self.tokens):
+            if token.size == 0:
+                token.offset = 0
+                continue
+
+            var_offset = solver.IntVar(0, worst_case_size - token.size, f"offset_{ai}")
+            token_var_pairs.append((token, var_offset))
+
+            # constraint: below peak mem usage
+            solver.Add(var_offset + token.size <= var_mem_used)
+
+        # visit overlapping tokens
+        for ai, (token_a, var_a) in enumerate(token_var_pairs):
+            for bi, (token_b, var_b) in enumerate(token_var_pairs[:ai]):
+                # skip if no overlap
+                if token_a.time_start >= token_b.time_end or token_b.time_start >= token_a.time_end:
+                    continue
+
+                a_above_b = solver.IntVar(0, 1, f"Bp_{ai}_{bi}")
+                b_above_a = solver.IntVar(0, 1, f"Bn_{ai}_{bi}")
+
+                # constraint: below xor above
+                solver.Add(a_above_b + b_above_a == 1)
+
+                # constraint: no overlap
+                solver.Add(var_a + token_a.size - worst_case_size * a_above_b <= var_b - 1)
+                solver.Add(var_b + token_b.size - worst_case_size * b_above_a <= var_a - 1)
+
+        solver.Minimize(var_mem_used)
+        status = solver.Solve()
+        assert (status == pywraplp.Solver.OPTIMAL)
+
+        def to_int(x):
+            assert abs(int(round(x)) - x) < EPSILON
+            return int(round(x))
+
+        for (token, var) in token_var_pairs:
+            var_value = var.solution_value()
+            token.offset = to_int(var_value)
+
+        self.allocated_size_used = to_int(var_mem_used.solution_value())
+        self.allocated = True
 
 
-def main():
-    alloc = TimeAllocator(0)
+def problem_simple() -> AllocationProblem:
+    alloc = AllocationProblem(0)
 
     a = alloc.alloc(128, 1)
     b = alloc.alloc(256, 4)
@@ -241,11 +296,34 @@ def main():
     # c = alloc.alloc(3)
     alloc.free(b, 8)
     # alloc.free(c)
-    d = alloc.alloc(512, 20)
+    _ = alloc.alloc(512, 20)
 
-    alloc.run_allocation(None, 30).plot_history(None, None)
+    alloc.set_final_time(30)
 
-    for token in alloc.tokens:
+    return alloc
+
+
+def problem_frag() -> AllocationProblem:
+    alloc = AllocationProblem(0)
+    a = alloc.alloc(128, 1)
+    b = alloc.alloc(256, 2)
+    alloc.free(a, 3)
+    _obstacle = alloc.alloc(64, 4)
+    _ = alloc.alloc(128, 4)
+    alloc.free(b, 5)
+    alloc.set_final_time(7)
+    return alloc
+
+
+def main():
+    # problem = problem_simple()
+    problem = problem_frag()
+
+    problem.run_allocation().plot_history(None, None)
+    # problem.solve_allocation_perfect()
+    problem.plot_solved(None, None)
+
+    for token in problem.tokens:
         print(token)
 
 

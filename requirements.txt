@@ -12,3 +12,5 @@ sympy~=1.11.1
 torch~=2.0.0+cu118
 plotly~=5.15.0
 pandas~=2.0.3
+cylp~=0.92.2
+ortools
